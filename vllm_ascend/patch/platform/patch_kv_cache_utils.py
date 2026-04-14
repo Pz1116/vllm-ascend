@@ -5,11 +5,14 @@ from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_utils import (create_kv_cache_group_specs,
                                          get_num_blocks, get_uniform_page_size,
                                          may_override_num_blocks,
-                                         unify_hybrid_kv_cache_specs)
+                                         unify_hybrid_kv_cache_specs,
+                                         get_kv_cache_config_from_groups)
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroupSpec,
                                         KVCacheSpec, KVCacheTensor,
                                         UniformTypeKVCacheSpecs)
 
+from vllm_ascend import envs
+USE_MULTI_GROUPS_KV_CACHE = envs.USE_MULTI_GROUPS_KV_CACHE
 
 def _get_kv_cache_groups_uniform_block_size(
     kv_cache_spec: dict[str, KVCacheSpec], ) -> list[KVCacheGroupSpec]:
