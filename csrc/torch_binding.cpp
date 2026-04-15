@@ -1052,11 +1052,14 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_npu(
     at::Tensor sparse_values_out = std::get<1>(quant_lightning_indexer_output);
     char *query_layout_ptr = const_cast<char *>(query_layout_str.c_str());
     char *key_layout_ptr = const_cast<char *>(key_layout_str.c_str());
+    int64_t state_cache_stride_dim0 = key.stride(0);
+    int64_t scale_stride_dim0 = key_dequant_scale.stride(0);
 
     EXEC_NPU_CMD(aclnnQuantLightningIndexer, query,
         key, weights, query_dequant_scale, key_dequant_scale, actual_seq_lengths_query, actual_seq_lengths_key,
         block_table, metadata, query_quant_mode, key_quant_mode, query_layout_ptr, key_layout_ptr, sparse_count, sparse_mode,
-        pre_tokens, next_tokens, cmp_ratio, return_value, sparse_indices_out, sparse_values_out);
+        pre_tokens, next_tokens, cmp_ratio, return_value, state_cache_stride_dim0,scale_stride_dim0, sparse_indices_out, sparse_values_out);
+
 
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
@@ -1099,12 +1102,22 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_attn_sharedkv_npu(const at::Tensor
     std::tuple<at::Tensor, at::Tensor> output = construct_output_tensor(q, layout_q_str, return_softmax_lse);
     at::Tensor attn_out = std::get<0>(output);
     at::Tensor softmax_lse = std::get<1>(output);
+    int64_t ori_kv_stride = 0;
+    int64_t cmp_kv_stride = 0;
+    if (ori_kv.has_value()){
+        const at::Tensor& tmp_kv = *ori_kv;
+        ori_kv_stride = tmp_kv.stride(0);
+    }
+    if (cmp_kv.has_value()){
+        const at::Tensor& tmp_kv = *cmp_kv;
+        cmp_kv_stride = tmp_kv.stride(0);
+    }
 
     char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
     EXEC_NPU_CMD(aclnnSparseAttnSharedkv, q, ori_kv, cmp_kv, ori_sparse_indices, cmp_sparse_indices,
         ori_block_table, cmp_block_table, cu_seqlens_q, cu_seqlens_ori_kv, cu_seqlens_cmp_kv, seqused_q, seqused_kv, sinks,
-        metadata, softmax_scale, cmp_ratio, ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right, layout_q_ptr,
+        metadata, softmax_scale, cmp_ratio, ori_mask_mode, cmp_mask_mode, ori_kv_stride, cmp_kv_stride, ori_win_left, ori_win_right, layout_q_ptr,
         layout_kv_ptr, return_softmax_lse, attn_out, softmax_lse);
     return std::tuple<at::Tensor, at::Tensor>(attn_out, softmax_lse);
 }
