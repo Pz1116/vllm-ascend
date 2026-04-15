@@ -2933,16 +2933,9 @@ class NPUModelRunner(GPUModelRunner):
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-
-                # current_kv_cache_spec = layer_kv_cache_spec[layer_name]
-
-                if isinstance(current_kv_cache_spec, SWAAttentionSpec) or \
-                    isinstance(current_kv_cache_spec, CompressAttentionSpec):
-                    dtype = current_kv_cache_spec.dtype
-
+                if isinstance(current_kv_cache_spec, [MLAAttentionSpec, SlidingWindowMLASpec]):
                     kv_tensor = kv_cache_raw_tensors[layer_name]
                     sum_page_size_bytes = kv_tensor.numel()
-
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
                     assert num_blocks == kv_cache_config.num_blocks, \
                         f"num_blocks: {num_blocks} should be equal to " \
@@ -2951,37 +2944,9 @@ class NPUModelRunner(GPUModelRunner):
                         num_blocks, current_kv_cache_spec.block_size,
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size)
-                    # TODO(cmq): CompressIndexerAttentionSpec has no attr nope_dtype
                     kv_size = sum_page_size_bytes - num_blocks * current_kv_cache_spec.page_size_padded
                     kv_cache = kv_tensor[:kv_size].view(current_kv_cache_spec.dtype).view(kv_cache_shape)
-                    # TODO(cmq): refactor me to dict, we need to differ the spec type
                     kv_caches[layer_name].append(kv_cache)
-                elif isinstance(current_kv_cache_spec, C4IndexerSpec):
-                    dtype = current_kv_cache_spec.dtype
-                    indexer_scale_dtype = current_kv_cache_spec.indexer_scale_dtype
-
-                    kv_tensor = kv_cache_raw_tensors[layer_name]
-                    sum_page_size_bytes = kv_tensor.numel()
-
-                    num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
-                    assert num_blocks == kv_cache_config.num_blocks, \
-                        f"num_blocks: {num_blocks} should be equal to " \
-                        f"kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
-                    indexer_kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                        num_blocks, current_kv_cache_spec.block_size,
-                        current_kv_cache_spec.num_kv_heads,
-                        current_kv_cache_spec.head_size)
-                    indexer_scale_cache_shape = self.attn_backend.get_kv_cache_shape(
-                        num_blocks, current_kv_cache_spec.block_size,
-                        current_kv_cache_spec.num_kv_heads,
-                        current_kv_cache_spec.indexer_scale_dim)
-                    indexer_kv_size = sum_page_size_bytes - current_kv_cache_spec.indexer_scale_size_bytes * num_blocks
-                    indexer_kv_cache = kv_tensor[:indexer_kv_size].view(dtype).view(indexer_kv_cache_shape)
-                    indexer_scale_cache = kv_tensor[indexer_kv_size:].view(indexer_scale_dtype).view(indexer_scale_cache_shape)
-
-                    # TODO(cmq): refactor me to dict, we need to differ the spec type
-                    kv_caches[layer_name].extend([indexer_kv_cache, indexer_scale_cache])
-                # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
                     if self.use_sparse:
