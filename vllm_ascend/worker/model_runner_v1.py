@@ -61,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
+    SlidingWindowMLASpec,
 )
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -3357,86 +3358,101 @@ class NPUModelRunner(GPUModelRunner):
         pad_size = 1024 * 1 * 1 * 2
         if layer_id in [0, 1] or "mtp" in layer_name:
             # TODO(cmq): DON'T use magic number for the block size and pad_size
-            kv_cache_spec_list.append(SWAAttentionSpec(
+            kv_cache_spec_list.append(SlidingWindowMLASpec(
                 block_size=128,
                 num_kv_heads=1,
                 head_size=hf_config.head_dim,
                 dtype=torch.bfloat16,
                 sliding_window=hf_config.window_size,
-                page_size_padded=pad_size,
+                page_size_padded=0,
             ))
         elif layer_id % 2 == 0:
             # TODO(cmq): DON'T use magic number for the block size
-            kv_cache_spec_list.append(Compress4AttentionSpec(
+            kv_cache_spec_list.append(MLAAttentionSpec(
                 block_size=128,
                 num_kv_heads=1,
                 head_size=hf_config.head_dim,
-                nope_dim=hf_config.head_dim -
-                hf_config.rope_head_dim,
-                rope_dim=hf_config.rope_head_dim,
-                scale_dim=0,
+                # nope_dim=hf_config.head_dim -
+                # hf_config.rope_head_dim,
+                # rope_dim=hf_config.rope_head_dim,
+                # scale_dim=0,
                 dtype=torch.bfloat16,
-                page_size_padded=pad_size,
+                page_size_padded=0,
+                compress_ratio=1,
             ))
-            kv_cache_spec_list.append(SWAAttentionSpec(
+            # SWAAttentionSpec
+            kv_cache_spec_list.append(SlidingWindowMLASpec(
                 block_size=128,
                 num_kv_heads=1,
                 head_size=hf_config.head_dim,
                 dtype=torch.bfloat16,
                 sliding_window=hf_config.window_size,
-                page_size_padded=pad_size,
+                page_size_padded=0,
             ))
-            kv_cache_spec_list.append(C4IndexerSpec(
-                block_size=1024,
+            # this refers to C4 indexer spec
+            kv_cache_spec_list.append(MLAAttentionSpec(
+                block_size=128,
                 num_kv_heads=1,
                 head_size=hf_config.index_head_dim,
-                indexer_scale_dim=1,
+                # indexer_scale_dim=1,
                 dtype=torch.int8,
-                page_size_padded=0
+                # page_size_padded here be set to size of scale 
+                page_size_padded=512,
+                compress_ratio=1,
             ))
             # TODO(cmq): get window size from hf_config, instead of hard code in spec class
-            kv_cache_spec_list.append(C4AttnKVStateSpec(
-                block_size=32,
+            # C4AttnKVStateSpec
+            kv_cache_spec_list.append(SlidingWindowMLASpec(
+                block_size=8,
                 num_kv_heads=1,
                 head_size=hf_config.head_dim * 2,
                 dtype=torch.float32,
-                page_size_padded=pad_size,
+                page_size_padded=512,
+                sliding_window=8,
             ))
-            kv_cache_spec_list.append(C4AttnScoreStateSpec(
-                block_size=32,
+            # C4AttnScoreStateSpec
+            kv_cache_spec_list.append(SlidingWindowMLASpec(
+                block_size=8,
                 num_kv_heads=1,
                 head_size=hf_config.head_dim * 2,
                 dtype=torch.float32,
-                page_size_padded=pad_size,
+                page_size_padded=512,
+                sliding_window=8,
             ))
-            kv_cache_spec_list.append(C4IndexerKVStateSpec(
-                block_size=128,
+            # C4IndexerKVStateSpec
+            kv_cache_spec_list.append(SlidingWindowMLASpec(
+                block_size=32,
                 num_kv_heads=1,
                 head_size=hf_config.index_head_dim * 2,
                 dtype=torch.float32,
-                page_size_padded=pad_size,
+                page_size_padded=512,
+                sliding_window=8,
             ))
-            kv_cache_spec_list.append(C4IndexerScoreStateSpec(
-                block_size=128,
+            # C4IndexerScoreStateSpec
+            kv_cache_spec_list.append(SlidingWindowMLASpec(
+                block_size=32,
                 num_kv_heads=1,
                 head_size=hf_config.index_head_dim * 2,
                 dtype=torch.float32,
-                page_size_padded=pad_size,
+                page_size_padded=512,
+                sliding_window=8,
             ))
         elif layer_id % 2 != 0:
             # TODO(cmq): DON'T use magic number for the block size
-            kv_cache_spec_list.append(Compress128AttentionSpec(
+            # C128A
+            kv_cache_spec_list.append(MLAAttentionSpec(
                 block_size=128,
                 num_kv_heads=1,
                 head_size=hf_config.head_dim,
-                nope_dim=hf_config.head_dim -
-                hf_config.rope_head_dim,
-                rope_dim=hf_config.rope_head_dim,
-                scale_dim=0,
+                # nope_dim=hf_config.head_dim -
+                # hf_config.rope_head_dim,
+                # rope_dim=hf_config.rope_head_dim,
+                # scale_dim=0,
                 dtype=torch.bfloat16,
-                page_size_padded=pad_size,
+                page_size_padded=0,
             ))
-            kv_cache_spec_list.append(SWAAttentionSpec(
+            # swa
+            kv_cache_spec_list.append(SlidingWindowMLASpec(
                 block_size=128,
                 num_kv_heads=1,
                 head_size=hf_config.head_dim,
@@ -3445,19 +3461,23 @@ class NPUModelRunner(GPUModelRunner):
                 page_size_padded=pad_size,
             ))
             # TODO(cmq): get window size from hf_config, instead of hard code in spec class
-            kv_cache_spec_list.append(C128AttnKVStateSpec(
-                block_size=64,
+            # C128AttnKVStateSpec
+            kv_cache_spec_list.append(SlidingWindowMLASpec(
+                block_size=32,
                 num_kv_heads=1,
                 head_size=hf_config.head_dim,
                 dtype=torch.float32,
-                page_size_padded=pad_size,
+                page_size_padded=65536,
+                sliding_window=128,
             ))
-            kv_cache_spec_list.append(C128AttnScoreStateSpec(
-                block_size=64,
+            # C128AttnScoreStateSpec
+            kv_cache_spec_list.append(SlidingWindowMLASpec(
+                block_size=32,
                 num_kv_heads=1,
                 head_size=hf_config.head_dim,
                 dtype=torch.float32,
-                page_size_padded=pad_size,
+                page_size_padded=65536,
+                sliding_window=128,
             ))
         return kv_cache_spec_list
 
