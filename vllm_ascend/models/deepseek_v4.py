@@ -536,30 +536,53 @@ class Compressor(nn.Module):
         self.norm = RMSNorm(self.head_dim, config.norm_eps)
 
         state_dtype = torch.float32
-        self.kv_state_cache = CompressorStateCache(
-            state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-            dtype=state_dtype,
-            compress_ratio=compress_ratio,
-            prefix=f"{prefix}.state_cache",
-        )
-        self.score_state_cache = CompressorStateCache(
-            state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-            dtype=state_dtype,
-            compress_ratio=compress_ratio,
-            prefix=f"{prefix}.state_cache",
-        )
-        self.indexer_kv_state_cache = CompressorStateCache(
-            state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-            dtype=state_dtype,
-            compress_ratio=compress_ratio,
-            prefix=f"{prefix}.state_cache",
-        )
-        self.indexer_score_state_cache = CompressorStateCache(
-            state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-            dtype=state_dtype,
-            compress_ratio=compress_ratio,
-            prefix=f"{prefix}.state_cache",
-        )
+        # TODO(zyj): change following codes if block_size is configurable
+        if compress_ratio == 4:
+            self.kv_state_cache = CompressorStateCache(
+                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                dtype=state_dtype,
+                compress_ratio=compress_ratio,
+                prefix=f"{prefix}.state_cache",
+            )
+            self.kv_state_cache.block_size = 8
+            self.score_state_cache = CompressorStateCache(
+                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                dtype=state_dtype,
+                compress_ratio=compress_ratio,
+                prefix=f"{prefix}.state_cache",
+            )
+            self.score_state_cache.block_size = 8
+            self.indexer_kv_state_cache = CompressorStateCache(
+                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                dtype=state_dtype,
+                compress_ratio=compress_ratio,
+                prefix=f"{prefix}.state_cache",
+            )
+            self.indexer_kv_state_cache.block_size = 32
+            self.indexer_score_state_cache = CompressorStateCache(
+                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                dtype=state_dtype,
+                compress_ratio=compress_ratio,
+                prefix=f"{prefix}.state_cache",
+            )
+            self.indexer_score_state_cache.block_size = 32
+        elif compress_ratio == 128:
+            self.kv_state_cache = CompressorStateCache(
+                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                dtype=state_dtype,
+                compress_ratio=compress_ratio,
+                prefix=f"{prefix}.state_cache",
+            )
+            self.kv_state_cache.block_size = 32
+            self.score_state_cache = CompressorStateCache(
+                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                dtype=state_dtype,
+                compress_ratio=compress_ratio,
+                prefix=f"{prefix}.state_cache",
+            )
+            self.score_state_cache.block_size = 32
+        else:
+            raise ValueError(f"Only support compress_ratio in [4, 128]. Got unsupported compress_ratio: {compress_ratio}")
 
 
     def overlap_transform(self, tensor: torch.Tensor, value=0):

@@ -6,8 +6,14 @@ from dataclasses import dataclass
 import torch
 import vllm.v1.kv_cache_interface
 from typing_extensions import Self
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    SlidingWindowMLASpec,
+    MLAAttentionSpec,
+)
+
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 @dataclass(frozen=True)
@@ -135,4 +141,66 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         )
 
 
+def _init_mla_cache_fields(spec: MLAAttentionSpec | SlidingWindowMLASpec):
+    """Shared MLA cache init logic for quantiztion format across different models."""
+    FP8_DTYPE = "fp8_ds_mla"
+    MODEL_VERSIONS = ["v32", "svf"]
+    if spec.cache_dtype_str != FP8_DTYPE:
+        return
+    assert spec.model_version in MODEL_VERSIONS, "Invalid model version."
+    assert (spec.model_version == "v32" and spec.compress_ratio == 1) or (
+        spec.model_version == "svf" and spec.compress_ratio in [1, 4, 128]
+    ), "Invalid compress ratio."
+    if spec.compress_ratio > 1:
+        assert spec.block_size % spec.compress_ratio == 0, (
+            f"Block size {spec.block_size} must be divisible by compress ratio."
+        )
+
+    # See `vllm/v1/attention/backends/mla/flashmla_sparse.py`
+    #  for details.
+    assert spec.num_kv_heads == 1, "MLAAttentionSpec only supports 1 head."
+    # TODO(yifan): move this head size to bytes mapping to a utils file.
+    if spec.model_version == "v32":
+        # V3.2: 512B NoPE + 64*2B FP16 RoPE + 4*4B FP32 scale = 656B
+        # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
+        if spec.head_size == 576:
+            object.__setattr__(spec, "head_size", 656)
+            object.__setattr__(spec, "head_size_v", 656)
+        elif spec.head_size != 656:
+            raise ValueError(f"Invalid head size for V3.2: {spec.head_size}")
+    elif spec.model_version == "svf":
+        # we should have a scale dim here.
+        # we should have dtype of scale and k of indexer here.
+        # NOTE(zyj): patch modifies here
+        HEAD_DIM_TO_BLOCK_BYTES: dict[int, int] = {
+            128: 129,  # SVF: 128B NoPE, 1B scale
+        }
+
+        if spec.head_size in HEAD_DIM_TO_BLOCK_BYTES:
+            actual_head_bytes = HEAD_DIM_TO_BLOCK_BYTES[spec.head_size]
+        else:
+            actual_head_bytes = spec.head_size
+        object.__setattr__(spec, "head_size", actual_head_bytes)
+        object.__setattr__(spec, "head_size_v", actual_head_bytes)
+
+        # ====================GPU=======================
+        # if spec.alignment is not None:
+        #     # Apply 576-byte alignment padding for SVF 512.
+        #     # KV cache tensor is allocated with padded page_size,
+        #     # but kernels access with shape [num_blocks, real_page_size].
+        #     actual_page_size = spec.real_page_size_bytes
+        #     padded_page_size = round_up(actual_page_size, spec.alignment)
+        #     if padded_page_size != actual_page_size:
+        #         object.__setattr__(spec, "page_size_padded", padded_page_size)
+
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            actual_page_size = spec.real_page_size_bytes
+            padded_page_size = round_up(actual_page_size, 128)
+            if padded_page_size != actual_page_size:
+                object.__setattr__(spec, "page_size_padded", padded_page_size)
+    else:
+        raise ValueError(f"Invalid model version: {spec.model_version}")
+
+
 vllm.v1.kv_cache_interface.MLAAttentionSpec = AscendMLAAttentionSpec
+vllm.v1.kv_cache_interface._init_mla_cache_fields = _init_mla_cache_fields
