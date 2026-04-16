@@ -273,7 +273,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     start_pos_decode: Optional[torch.Tensor] = None
     decode_sas_metadata: Optional[torch.Tensor] = None
     decode_qli_metadata: Optional[torch.Tensor] = None
-    ratio_to_sas_metadata: Optional = None
+    prefill_ratio_to_sas_metadata: Optional[dict] = None
+    decode_ratio_to_sas_metadata: Optional[dict] = None
     block_size: Optional[int] = 128
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -445,7 +446,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         num_reqs_actual = kwargs.get("num_reqs_actual", None)
-        self.ratio_to_sas_metadata = kwargs.get("ratio_to_sas_metadata", None)
+        self.prefill_ratio_to_sas_metadata = kwargs.get("prefill_ratio_to_sas_metadata", None)
+        self.decode_ratio_to_sas_metadata = kwargs.get("decode_ratio_to_sas_metadata", None)
         self.block_size = kwargs.get("block_size", 128)
 
         self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = \
@@ -616,8 +618,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         layer_name = f"c{self.compressor_ratio}"
         if self.compressor_ratio <= 1:
-            if self.ratio_to_sas_metadata.get(layer_name) is None:
-                self.ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
+                self.prefill_ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
                     num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=self.model_config.get_head_size(),
@@ -638,10 +640,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     has_ori_kv=True,
                     has_cmp_kv=False,
                     device=str(self.seqused_q.device))
-            sas_metadata = self.ratio_to_sas_metadata[layer_name]
+            sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
         elif self.compressor_ratio == 4:
-            if self.ratio_to_sas_metadata.get(layer_name) is None:
-                self.ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
+                self.prefill_ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
                     num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=self.model_config.get_head_size(),
@@ -665,7 +667,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     has_ori_kv=True,
                     has_cmp_kv=True,
                     device=str(self.seqused_q.device))
-            sas_metadata = self.ratio_to_sas_metadata[layer_name]
+            sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
         else:
             if self.ratio_to_sas_metadata.get(layer_name) is None:
                 self.ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
@@ -833,8 +835,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         assert self.decode_sas_metadata is not None
         if self.compressor_ratio <= 1:
-            if self.ratio_to_sas_metadata.get(layer_name) is None:
-                self.ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
+                self.decode_ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
                     num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=self.model_config.get_head_size(),
@@ -856,10 +858,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     has_ori_kv=True,
                     has_cmp_kv=False,
                     device=str(self.seqused_q.device))
-            self.decode_sas_metadata[:1024] = self.ratio_to_sas_metadata[layer_name]
+            self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         elif self.compressor_ratio == 4:
-            if self.ratio_to_sas_metadata.get(layer_name) is None:
-                self.ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
+                self.decode_ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
                     num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=self.model_config.get_head_size(),
@@ -883,10 +885,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     has_ori_kv=True,
                     has_cmp_kv=True,
                     device=str(self.seqused_q.device))
-            self.decode_sas_metadata[:1024] = self.ratio_to_sas_metadata[layer_name]
+            self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         else:
-            if self.ratio_to_sas_metadata.get(layer_name) is None:
-                self.ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
+                self.decode_ratio_to_sas_metadata[layer_name] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
                     num_heads_q=n_local_heads,
                     num_heads_kv=1,
                     head_dim=self.model_config.get_head_size(),
@@ -908,7 +910,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     has_ori_kv=True,
                     has_cmp_kv=True,
                     device=str(self.seqused_q.device))
-            self.decode_sas_metadata[:1024] = self.ratio_to_sas_metadata[layer_name]
+            self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         assert self.decode_qli_metadata is not None
         self.decode_qli_metadata[:1024] = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
             actual_seq_lengths_query=query_start_loc[1:].clone(),
