@@ -17,6 +17,7 @@ from vllm.v1.attention.backend import (AttentionCGSupport,
                                         AttentionMetadataBuilder)
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.v1.attention.backends.mla.sparse_swa import SVFSWACache
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
@@ -566,7 +567,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         def _get_compressed_decode_token_start_and_end(decode_input_positions,
                                                        compress_ratio):
-            # TODO(cmq): decode_input_positions is a device tensor,
+            # TODO(yilin): decode_input_positions is a device tensor,
             # this will introduce sync operation. Refactor me to torch.where instead
             mask = ((decode_input_positions + 1) % compress_ratio) == 0
             compressed_decode_num = mask.sum()
@@ -1088,7 +1089,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        kv_cache: Tuple[torch.Tensor],
         attn_metadata: list[M],
         need_gather_q_kv: bool = False,
         output: Optional[torch.Tensor] = None,
@@ -1114,7 +1115,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         o_proj_input = torch.empty(o_proj_input_shape,
                                    dtype=hidden_states.dtype,
                                    device=hidden_states.device)
-
         if has_prefill:
             assert attn_metadata[0].prefill is not None
             output_prefill = self._forward_prefill(layer_name,
@@ -1170,20 +1170,20 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         layer_name,
         hidden_states: torch.Tensor,
-        kv_cache: Tuple,
+        kv_cache: Tuple[torch.Tensor],
         attn_metadata: AscendDSAMetadata,
     ):
         compress_common_attn_metadata = None
         if self.compress_ratio == 4:
-            (swa_cache, compressor_attn_cache, _, _, compressor_kv_state, compressor_score_state, _, _) = kv_cache
+            (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
             (swa_metadata, compressor_attn_metadata, _, compressor_kv_state_metadata, compressor_score_state_metadata, _, _) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         elif self.compress_ratio == 128:
-            (swa_cache, compressor_attn_cache, compressor_kv_state, compressor_score_state) = kv_cache
+            (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
             (swa_metadata, compressor_attn_metadata, compressor_kv_state_metadata, compressor_score_state_metadata) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         else:
-            (swa_cache,) = kv_cache
+            (_, swa_kv_cache, _, _, _, _, _, _) = kv_cache
             (swa_metadata,) = attn_metadata
             compress_common_attn_metadata = swa_metadata
         
@@ -1222,7 +1222,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # swa exec kv
         torch_npu.npu_scatter_nd_update_(
-            swa_cache.view(-1, kv.shape[-1]),
+            swa_kv_cache.view(-1, kv.shape[-1]),
             swa_metadata.prefill.slot_mapping.unsqueeze(-1), kv)
         compress_cos = compress_common_attn_metadata.prefill.compress_cos[layer_name]
         compress_sin = compress_common_attn_metadata.prefill.compress_sin[layer_name]
@@ -1249,8 +1249,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
-                compressor_kv_state.squeeze(-2),
-                compressor_score_state.squeeze(-2),
+                kv_state_cache.squeeze(-2),
+                score_state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
                 compress_sin.view(-1, compress_sin.shape[-1]),
@@ -1272,11 +1272,11 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # kv_compress_epilog
             torch_npu.npu_scatter_nd_update_(
-                compressor_attn_cache.view(-1, compressed_kv.shape[-1]),
+                compress_kv_cache.view(-1, compressed_kv.shape[-1]),
                 compressor_attn_metadata.prefill.slot_mapping.unsqueeze(-1),
                 compressed_kv.view(-1, compressed_kv.shape[-1]))
 
-        sliding_window_kv = kv if self.enable_kv_tnd else swa_cache
+        sliding_window_kv = kv if self.enable_kv_tnd else swa_kv_cache
 
         if self.compress_ratio == 1:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
@@ -1300,7 +1300,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 q,
                 ori_kv=sliding_window_kv,
                 cmp_kv=compressed_kv.unsqueeze(1)
-                if self.enable_kv_tnd else compressor_attn_cache,
+                if self.enable_kv_tnd else compress_kv_cache,
                 cmp_sparse_indices=compress_topk_idxs,
                 ori_block_table=swa_metadata.prefill.block_table,
                 cmp_block_table=compressor_attn_metadata.prefill.block_table,
@@ -1323,7 +1323,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 q,
                 ori_kv=sliding_window_kv,
                 cmp_kv=compressed_kv.unsqueeze(1)
-                if self.enable_kv_tnd else compressor_attn_cache,
+                if self.enable_kv_tnd else compress_kv_cache,
                 ori_block_table=swa_metadata.prefill.block_table,
                 cmp_block_table=compressor_attn_metadata.prefill.block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
@@ -1344,24 +1344,36 @@ class AscendDSAImpl(DSAAttentionImpl):
         return attn_output
 
     def _forward_decode(
-            self,
-            layer_name,
-            hidden_states: torch.Tensor,
-            kv_cache: Tuple,
-            attn_metadata: AscendDSAMetadata,
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,
+        kv_cache: Tuple,
+        attn_metadata: AscendDSAMetadata,
     ):
         assert attn_metadata[0].decode is not None
         compress_common_attn_metadata = None
+
+        # if self.compress_ratio == 4:
+        #     (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
+        #     (swa_metadata, compressor_attn_metadata, _, compressor_kv_state_metadata, compressor_score_state_metadata, _, _) = attn_metadata
+        #     compress_common_attn_metadata = compressor_attn_metadata
+        # elif self.compress_ratio == 128:
+        #     (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
+        #     (swa_metadata, compressor_attn_metadata, compressor_kv_state_metadata, compressor_score_state_metadata) = attn_metadata
+        #     compress_common_attn_metadata = compressor_attn_metadata
+        # else:
+        #     (swa_metadata,) = attn_metadata
+        #     compress_common_attn_metadata = swa_metadata
         if self.compress_ratio == 4:
-            (swa_cache, compressor_attn_cache, _, _, compressor_kv_state, compressor_score_state, _, _) = kv_cache
+            (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
             (swa_metadata, compressor_attn_metadata, _, compressor_kv_state_metadata, compressor_score_state_metadata, _, _) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         elif self.compress_ratio == 128:
-            (swa_cache, compressor_attn_cache, compressor_kv_state, compressor_score_state) = kv_cache
+            (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
             (swa_metadata, compressor_attn_metadata, compressor_kv_state_metadata, compressor_score_state_metadata) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         else:
-            (swa_cache,) = kv_cache
+            (_, swa_kv_cache, _, _, _, _, _, _) = kv_cache
             (swa_metadata,) = attn_metadata
             compress_common_attn_metadata = swa_metadata
         cos = compress_common_attn_metadata.decode.cos[layer_name]
@@ -1423,7 +1435,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # swa exec kv
             torch_npu.npu_scatter_nd_update_(
-                swa_cache.view(-1, kv.shape[-1]),
+                swa_kv_cache.view(-1, kv.shape[-1]),
                 swa_metadata.decode.slot_mapping.unsqueeze(-1), kv)
 
             wait_attention_cal_event = torch.npu.current_stream().record_event() \
@@ -1458,8 +1470,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
-                compressor_kv_state.squeeze(-2),
-                compressor_score_state.squeeze(-2),
+                kv_state_cache.squeeze(-2),
+                score_state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
                 compress_sin.view(-1, compress_sin.shape[-1]),
@@ -1477,13 +1489,13 @@ class AscendDSAImpl(DSAAttentionImpl):
                 enable_grad=False)
             # kv_compress_epilog
             torch_npu.npu_scatter_nd_update_(
-                compressor_attn_cache.view(-1, compressed_kv.shape[-1]),
+                compress_kv_cache.view(-1, compressed_kv.shape[-1]),
                 compressor_attn_metadata.decode.slot_mapping.unsqueeze(-1),
                 compressed_kv.view(-1, compressed_kv.shape[-1]))
         if self.compress_ratio == 1:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
-                ori_kv=swa_cache,
+                ori_kv=swa_kv_cache,
                 ori_block_table=swa_metadata.decode.block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
                 seqused_kv=actual_seq_lengths_key,
@@ -1499,8 +1511,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         elif self.compress_ratio == 4:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
-                ori_kv=swa_cache,
-                cmp_kv=compressor_attn_cache,
+                ori_kv=swa_kv_cache,
+                cmp_kv=compress_kv_cache,
                 cmp_sparse_indices=compress_topk_idxs,
                 ori_block_table=swa_metadata.decode.block_table,
                 cmp_block_table=compressor_attn_metadata.decode.block_table,
@@ -1519,8 +1531,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
-                ori_kv=swa_cache,
-                cmp_kv=compressor_attn_cache,
+                ori_kv=swa_kv_cache,
+                cmp_kv=compress_kv_cache,
                 ori_block_table=swa_metadata.decode.block_table,
                 cmp_block_table=compressor_attn_metadata.decode.block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
@@ -1541,7 +1553,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        kv_cache: tuple[torch.Tensor],
         attn_metadata: list[M],
         cos: torch.Tensor,
         sin: torch.Tensor,
@@ -1552,7 +1564,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
-        (_, _, indexer_kv_cache, indexer_scale_cache, _, _, indexer_kv_state, indexer_kv_score_state) = kv_cache
+        (_, _,_, _, indexer_kv_state_cache, indexer_score_state_cache, indexer_k_cache, indexer_scale_cache) = kv_cache
         (_, _, indexer_kv_scale_metadata, _, _, indexer_kv_state_metadata, indexer_kv_score_state_metadata) = attn_metadata
 
         if (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
@@ -1599,8 +1611,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             x,
             self.indexcom_wkv.weight,
             self.indexcom_wgate.weight,
-            indexer_kv_state.squeeze(-2),
-            indexer_kv_score_state.squeeze(-2),
+            indexer_kv_state_cache.squeeze(-2),
+            indexer_score_state_cache.squeeze(-2),
             self.indexcom_ape,
             self.indexcom_norm.weight,
             compressed_sin.view(-1, compressed_sin.shape[-1]),
@@ -1644,7 +1656,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert indexer_kv_scale_metadata.prefill is not None
             if kv is not None:
                 torch_npu.npu_scatter_nd_update_(
-                    indexer_kv_cache.view(-1, kv.shape[-1]),
+                    indexer_k_cache.view(-1, kv.shape[-1]),
                     indexer_kv_scale_metadata.prefill.slot_mapping.unsqueeze(-1),
                     kv.view(-1, kv.shape[-1]))
                 torch_npu.npu_scatter_nd_update_(
@@ -1655,7 +1667,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert indexer_kv_scale_metadata.decode is not None
             if kv is not None:
                 torch_npu.npu_scatter_nd_update_(
-                    indexer_kv_cache.view(-1, kv.shape[-1]),
+                    indexer_k_cache.view(-1, kv.shape[-1]),
                     indexer_kv_scale_metadata.decode.slot_mapping.unsqueeze(-1),
                     kv.view(-1, kv.shape[-1]))
                 torch_npu.npu_scatter_nd_update_(
@@ -1678,7 +1690,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer(
             query=q,
-            key=indexer_kv_cache,
+            key=indexer_k_cache,
             weights=weights.to(torch.float16),
             query_dequant_scale=q_scale,
             key_dequant_scale=indexer_scale_cache.squeeze(-2),

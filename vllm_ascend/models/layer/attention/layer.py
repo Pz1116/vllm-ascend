@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.attention.backends.mla.sparse_swa import SVFSWACache
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.patch.platform.patch_selector import get_attn_backend
@@ -72,6 +73,9 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         self.compress_ratio = compress_ratio
         self.layer_name = prefix
         self.head_size = self.head_dim
+        self.swa_cache_layer: SVFSWACache = extra_impl_args.get("swa_cache_layer", None)
+
+        assert self.swa_cache_layer is not None
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype

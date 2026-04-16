@@ -30,6 +30,11 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backends.mla.sparse_swa import SVFSWACache
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 
@@ -105,6 +110,16 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.indexer_rotary_emb = dsa_modules.indexer_rotary_emb
         self.prefix = prefix
 
+        ascend_device_type = get_ascend_device_type()
+        k_dtype = torch.fp8 if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
+        self.swa_cache_layer = SVFSWACache(
+            head_dim=self.head_dim,
+            window_size=self.window_size,
+            dtype=k_dtype,
+            prefix=f"{prefix}.swa_cache",
+            cache_config=cache_config,
+        )
+
         self.dsa_attn = DSAAttention(
             dim=self.dim,
             n_heads=self.n_heads,
@@ -135,6 +150,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             wo_b=self.wo_b,
             attn_sink=self.attn_sink,
             eps=self.eps,
+            swa_cache_layer=self.swa_cache_layer,
         )
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -151,6 +167,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         need_gather_q_kv = get_forward_context().flash_comm_v1_enabled
         output_shape = hidden_states.shape
         # FIXME: This does not seem right, should make sure the buffer is fixed
+        swa_kv_cache = self.swa_cache_layer.kv_cache
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
@@ -172,7 +189,26 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata[self.dsa_attn.layer_name]
     else:
         attn_metadata = forward_context.attn_metadata
-    kv_cache = self.dsa_attn.kv_cache[forward_context.virtual_engine]
+    # 
+    compress_kv_cache = self.dsa_attn.kv_cache[forward_context.virtual_engine]
+    swa_kv_cache = self.swa_cache_layer.kv_cache
+    kv_state_cache = self.compressor.kv_state_cache.kv_cache
+    score_state_cache = self.compressor.score_state_cache.kv_cache
+    indexer_kv_state_cache = self.compressor.indexer_kv_state_cache.kv_cache
+    indexer_score_state_cache = self.compressor.indexer_score_state_cache.kv_cache
+    indexer_k_cache, indexer_scale_cache = self.indexer.k_cache
+
+    kv_cache = (
+        compress_kv_cache,
+        swa_kv_cache,
+        kv_state_cache,
+        score_state_cache,
+        indexer_kv_state_cache,
+        indexer_score_state_cache,
+        indexer_k_cache,
+        indexer_scale_cache,
+    )
+
     self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states,
                                kv_cache, attn_metadata, need_gather_q_kv,
                                output)

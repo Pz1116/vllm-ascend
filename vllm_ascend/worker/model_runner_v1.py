@@ -2908,6 +2908,34 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_cache_raw_tensors
 
+    def _adjust_kv_layout(self,
+                          raw_tensor: torch.Tensor,
+                          kv_cache_shape_list: list[int],
+                          kv_cache_dtype_list: list[int],
+                          page_size_bytes: int,
+                          num_blocks: int):
+        reshaped_kv_tensors = []
+        storage_offset_bytes = 0
+        for shape, dtype in zip(kv_cache_shape_list, kv_cache_dtype_list):
+            dtype_size = get_dtype_size(dtype)
+            num_element_per_page = (
+                page_size_bytes // dtype_size
+            )
+            target_shape = (num_blocks, *shape)
+            stride = torch.empty(target_shape).stride()
+            target_stride = (num_element_per_page, *stride[1:])
+            assert storage_offset_bytes % dtype_size == 0
+            tensor = torch.as_strided(
+                raw_tensor.view(dtype),
+                size=target_shape,
+                stride=target_stride,
+                storage_offset=storage_offset_bytes // dtype_size,
+            )
+            reshaped_kv_tensors.append(tensor)
+            storage_offset_bytes += stride[0] * dtype_size
+        return reshaped_kv_tensors
+
+
     def _reshape_kv_cache_tensors(
         self,
         kv_cache_config: KVCacheConfig,
@@ -2933,7 +2961,7 @@ class NPUModelRunner(GPUModelRunner):
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                if isinstance(current_kv_cache_spec, [MLAAttentionSpec, SlidingWindowMLASpec]):
+                if self.use_compress and isinstance(current_kv_cache_spec, [MLAAttentionSpec, SlidingWindowMLASpec]):
                     kv_tensor = kv_cache_raw_tensors[layer_name]
                     sum_page_size_bytes = kv_tensor.numel()
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
@@ -2944,8 +2972,22 @@ class NPUModelRunner(GPUModelRunner):
                         num_blocks, current_kv_cache_spec.block_size,
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size)
-                    kv_size = sum_page_size_bytes - num_blocks * current_kv_cache_spec.page_size_padded
-                    kv_cache = kv_tensor[:kv_size].view(current_kv_cache_spec.dtype).view(kv_cache_shape)
+                    kv_cache_shape_list = [kv_cache_shape]
+                    kv_cache_dtype_list = [current_kv_cache_spec.dtype]
+                    if current_kv_cache_spec.scale_dim != 0:
+                        indexer_k_shape = kv_cache_shape[:-2] + \
+                            [kv_cache_shape[-1] - current_kv_cache_spec.scale_dim]
+                        indexer_scale_shape = kv_cache_shape[:-2] + [current_kv_cache_spec.scale_dim]
+                        kv_cache_shape_list = [indexer_k_shape, indexer_scale_shape]
+                        kv_cache_dtype_list = [current_kv_cache_spec.dtype, current_kv_cache_spec.scale_dtype]
+                    kv_cache = self._adjust_kv_layout(raw_tensor,
+                                           kv_cache_shape_list,
+                                           kv_cache_dtype_list,
+                                           current_kv_cache_spec.page_size_bytes,
+                                           num_blocks,
+                                           )
+                    # kv_size = sum_page_size_bytes - num_blocks * current_kv_cache_spec.page_size_padded
+                    # kv_cache = kv_tensor[:kv_size].view(current_kv_cache_spec.dtype).view(kv_cache_shape)
                     kv_caches[layer_name].append(kv_cache)
                 # encounter OOM issue
                 elif isinstance(current_kv_cache_spec, AttentionSpec):

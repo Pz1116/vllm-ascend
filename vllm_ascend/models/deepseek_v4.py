@@ -65,6 +65,12 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.model_executor.models.deepseek_compressor import CompressorStateCache
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_device_type,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
@@ -443,15 +449,38 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        self.compressor = Compressor(
-            vllm_config,
-            config,
-            compress_ratio,
-            self.head_dim,
-            True,
-            quant_config=quant_config,
-            cache_config=cache_config,
-            prefix=f"{prefix}.compressor")  #Compressor(4, 128)
+        ascend_device_type = get_ascend_device_type()
+        k_dtype = torch.fp8 if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
+
+        if self.compress_ratio == 1:
+            # NOTE(yifan): for head_dim of fp8 kv cache, we handle quantization
+            # format and scale factor in the MLAAttentionSpec
+            self.k_cache = DeepseekV32IndexerCache(
+                head_dim=self.head_dim,
+                dtype=k_dtype,
+                prefix=f"{prefix}.k_cache",
+                cache_config=cache_config,
+            )
+        else:
+            # TODO(cmq): change the dtype of cache
+            self.k_cache = DeepseekV32IndexerCache(
+                head_dim=self.head_dim,
+                dtype=k_dtype,
+                prefix=f"{prefix}.k_cache",
+                cache_config=cache_config,
+                compress_ratio=self.compress_ratio,
+            )
+            self.compressor = None
+            if self.compress_ratio > 1:
+                self.compressor = Compressor(
+                    vllm_config,
+                    config,
+                    self.compress_ratio,
+                    self.head_dim,
+                    True,
+                    quant_config=quant_config,
+                    cache_config=cache_config,
+                    prefix=f"{prefix}.compressor")  #Compressor(4, 128)
 
     def forward(self, hidden_states: torch.Tensor, qr: torch.Tensor, positions,
                 rotary_emb) -> torch.Tensor:
@@ -506,7 +535,32 @@ class Compressor(nn.Module):
         )
         self.norm = RMSNorm(self.head_dim, config.norm_eps)
 
-        self.kv_cache = None
+        state_dtype = torch.float32
+        self.kv_state_cache = CompressorStateCache(
+            state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+            dtype=state_dtype,
+            compress_ratio=compress_ratio,
+            prefix=f"{prefix}.state_cache",
+        )
+        self.score_state_cache = CompressorStateCache(
+            state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+            dtype=state_dtype,
+            compress_ratio=compress_ratio,
+            prefix=f"{prefix}.state_cache",
+        )
+        self.indexer_kv_state_cache = CompressorStateCache(
+            state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+            dtype=state_dtype,
+            compress_ratio=compress_ratio,
+            prefix=f"{prefix}.state_cache",
+        )
+        self.indexer_score_state_cache = CompressorStateCache(
+            state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+            dtype=state_dtype,
+            compress_ratio=compress_ratio,
+            prefix=f"{prefix}.state_cache",
+        )
+
 
     def overlap_transform(self, tensor: torch.Tensor, value=0):
         b, s, _, _ = tensor.size()
