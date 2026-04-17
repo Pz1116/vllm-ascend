@@ -538,48 +538,27 @@ class Compressor(nn.Module):
         state_dtype = torch.float32
         # TODO(zyj): change following codes if block_size is configurable
         if compress_ratio == 4:
-            self.kv_state_cache = CompressorStateCache(
+            self.state_cache = CompressorStateCache(
                 state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=8,
+                block_size=4
             )
-            self.score_state_cache = CompressorStateCache(
+            self.indexer_state_cache = CompressorStateCache(
                 state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
-                prefix=f"{prefix}.state_cache",
-                block_size=8,
-            )
-            self.indexer_kv_state_cache = CompressorStateCache(
-                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-                dtype=state_dtype,
-                compress_ratio=compress_ratio,
-                prefix=f"{prefix}.state_cache",
-                block_size=32
-            )
-            self.indexer_score_state_cache = CompressorStateCache(
-                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-                dtype=state_dtype,
-                compress_ratio=compress_ratio,
-                prefix=f"{prefix}.state_cache",
-                block_size=32
+                prefix=f"{prefix}.indexer_state_cache",
+                block_size=16
             )
         elif compress_ratio == 128:
-            self.kv_state_cache = CompressorStateCache(
+            self.state_cache = CompressorStateCache(
                 state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=32
-            )
-            self.score_state_cache = CompressorStateCache(
-                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-                dtype=state_dtype,
-                compress_ratio=compress_ratio,
-                prefix=f"{prefix}.state_cache",
-                block_size=32
+                block_size=16
             )
         else:
             raise ValueError(f"Only support compress_ratio in [4, 128]. Got unsupported compress_ratio: {compress_ratio}")

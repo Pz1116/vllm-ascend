@@ -3408,38 +3408,20 @@ class NPUModelRunner(GPUModelRunner):
                 compress_ratio=1,
             ))
             # TODO(cmq): get window size from hf_config, instead of hard code in spec class
-            # C4AttnKVStateSpec
+            # C4AttnKVStateSpec + C4AttnScoreStateSpec
             kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=8,
+                block_size=4,
                 num_kv_heads=1,
-                head_size=hf_config.head_dim * 2,
+                head_size=hf_config.head_dim * 2 * 2,
                 dtype=torch.float32,
                 page_size_padded=512,
                 sliding_window=8,
             ))
-            # C4AttnScoreStateSpec
+            # C4IndexerKVStateSpec + C4IndexerScoreStateSpec
             kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=8,
+                block_size=16,
                 num_kv_heads=1,
-                head_size=hf_config.head_dim * 2,
-                dtype=torch.float32,
-                page_size_padded=512,
-                sliding_window=8,
-            ))
-            # C4IndexerKVStateSpec
-            kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=32,
-                num_kv_heads=1,
-                head_size=hf_config.index_head_dim * 2,
-                dtype=torch.float32,
-                page_size_padded=512,
-                sliding_window=8,
-            ))
-            # C4IndexerScoreStateSpec
-            kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=32,
-                num_kv_heads=1,
-                head_size=hf_config.index_head_dim * 2,
+                head_size=hf_config.index_head_dim * 2 * 2,
                 dtype=torch.float32,
                 page_size_padded=512,
                 sliding_window=8,
@@ -3468,20 +3450,11 @@ class NPUModelRunner(GPUModelRunner):
                 page_size_padded=pad_size,
             ))
             # TODO(cmq): get window size from hf_config, instead of hard code in spec class
-            # C128AttnKVStateSpec
+            # C128AttnKVStateSpec + C128AttnScoreStateSpec
             kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=32,
+                block_size=16,
                 num_kv_heads=1,
-                head_size=hf_config.head_dim,
-                dtype=torch.float32,
-                page_size_padded=65536,
-                sliding_window=128,
-            ))
-            # C128AttnScoreStateSpec
-            kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=32,
-                num_kv_heads=1,
-                head_size=hf_config.head_dim,
+                head_size=hf_config.head_dim * 2,
                 dtype=torch.float32,
                 page_size_padded=65536,
                 sliding_window=128,

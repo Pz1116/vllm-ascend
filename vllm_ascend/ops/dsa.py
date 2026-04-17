@@ -192,19 +192,15 @@ def dsa_forward(
     # 
     compress_kv_cache = self.dsa_attn.kv_cache[forward_context.virtual_engine]
     swa_kv_cache = self.swa_cache_layer.kv_cache
-    kv_state_cache = self.compressor.kv_state_cache.kv_cache
-    score_state_cache = self.compressor.score_state_cache.kv_cache
-    indexer_kv_state_cache = self.compressor.indexer_kv_state_cache.kv_cache
-    indexer_score_state_cache = self.compressor.indexer_score_state_cache.kv_cache
+    state_cache = self.compressor.state_cache.kv_cache
+    indexer_state_cache = self.compressor.indexer_state_cache.kv_cache
     indexer_k_cache, indexer_scale_cache = self.indexer.k_cache
 
     kv_cache = (
         compress_kv_cache,
         swa_kv_cache,
-        kv_state_cache,
-        score_state_cache,
-        indexer_kv_state_cache,
-        indexer_score_state_cache,
+        state_cache,
+        indexer_state_cache,
         indexer_k_cache,
         indexer_scale_cache,
     )

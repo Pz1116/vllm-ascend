@@ -1175,15 +1175,15 @@ class AscendDSAImpl(DSAAttentionImpl):
     ):
         compress_common_attn_metadata = None
         if self.compress_ratio == 4:
-            (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
+            (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             (swa_metadata, compressor_attn_metadata, _, compressor_kv_state_metadata, compressor_score_state_metadata, _, _) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         elif self.compress_ratio == 128:
-            (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
+            (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             (swa_metadata, compressor_attn_metadata, compressor_kv_state_metadata, compressor_score_state_metadata) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         else:
-            (_, swa_kv_cache, _, _, _, _, _, _) = kv_cache
+            (_, swa_kv_cache, _, _, _, _,) = kv_cache
             (swa_metadata,) = attn_metadata
             compress_common_attn_metadata = swa_metadata
         
@@ -1249,12 +1249,14 @@ class AscendDSAImpl(DSAAttentionImpl):
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
-                kv_state_cache.squeeze(-2),
-                score_state_cache.squeeze(-2),
+                # TODO(yilin): adapt to the latest operator
+                state_cache.squeeze(-2),
+                # score_state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
                 compress_sin.view(-1, compress_sin.shape[-1]),
                 compress_cos.view(-1, compress_cos.shape[-1]),
+                # TODO(lxs): adapt the block table
                 kv_block_table=compressor_kv_state_metadata.prefill.block_table,
                 score_block_table=compressor_score_state_metadata.prefill.block_table,
                 cu_seqlens=actual_seq_lengths_query,
@@ -1365,15 +1367,15 @@ class AscendDSAImpl(DSAAttentionImpl):
         #     (swa_metadata,) = attn_metadata
         #     compress_common_attn_metadata = swa_metadata
         if self.compress_ratio == 4:
-            (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
+            (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             (swa_metadata, compressor_attn_metadata, _, compressor_kv_state_metadata, compressor_score_state_metadata, _, _) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         elif self.compress_ratio == 128:
-            (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
+            (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             (swa_metadata, compressor_attn_metadata, compressor_kv_state_metadata, compressor_score_state_metadata) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         else:
-            (_, swa_kv_cache, _, _, _, _, _, _) = kv_cache
+            (_, swa_kv_cache, _, _, _, _) = kv_cache
             (swa_metadata,) = attn_metadata
             compress_common_attn_metadata = swa_metadata
         cos = compress_common_attn_metadata.decode.cos[layer_name]
@@ -1470,8 +1472,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 hidden_states,
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
-                kv_state_cache.squeeze(-2),
-                score_state_cache.squeeze(-2),
+                state_cache.squeeze(-2),
+                # score_state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
                 compress_sin.view(-1, compress_sin.shape[-1]),
@@ -1564,7 +1566,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
-        (_, _,_, _, indexer_kv_state_cache, indexer_score_state_cache, indexer_k_cache, indexer_scale_cache) = kv_cache
+        (_, _,_, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache) = kv_cache
         (_, _, indexer_kv_scale_metadata, _, _, indexer_kv_state_metadata, indexer_kv_score_state_metadata) = attn_metadata
 
         if (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
@@ -1611,8 +1613,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             x,
             self.indexcom_wkv.weight,
             self.indexcom_wgate.weight,
-            indexer_kv_state_cache.squeeze(-2),
-            indexer_score_state_cache.squeeze(-2),
+            indexer_state_cache.squeeze(-2),
             self.indexcom_ape,
             self.indexcom_norm.weight,
             compressed_sin.view(-1, compressed_sin.shape[-1]),
