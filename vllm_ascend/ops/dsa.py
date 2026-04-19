@@ -189,12 +189,26 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata[self.dsa_attn.layer_name]
     else:
         attn_metadata = forward_context.attn_metadata
+
+    if attn_metadata is None:
+        # Profiling run.
+        output.fill_(0)
+        return
+
     # 
     compress_kv_cache = self.dsa_attn.kv_cache[forward_context.virtual_engine]
     swa_kv_cache = self.swa_cache_layer.kv_cache
-    state_cache = self.compressor.state_cache.kv_cache
-    indexer_state_cache = self.compressor.indexer_state_cache.kv_cache
-    indexer_k_cache, indexer_scale_cache = self.indexer.k_cache
+    state_cache = None
+    indexer_state_cache = None
+    indexer_k_cache = None
+    indexer_scale_cache = None
+
+    if self.compress_ratio > 1:
+        state_cache = self.compressor.state_cache.kv_cache
+    if self.compress_ratio == 4:
+        # TODO(qcs): refactor me
+        indexer_state_cache = self.compressor.indexer_state_cache.kv_cache if hasattr(self.compressor, "indexer_state_cache") else None
+        indexer_k_cache, indexer_scale_cache = self.indexer.k_cache.kv_cache[0][0][0], self.indexer.k_cache.kv_cache[0][0][1]
 
     kv_cache = (
         compress_kv_cache,

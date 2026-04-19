@@ -94,6 +94,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.patch.platform.patch_kv_cache_interface import AscendMLAAttentionSpec
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -2908,12 +2909,13 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_cache_raw_tensors
 
-    def _adjust_kv_layout(self,
-                          raw_tensor: torch.Tensor,
-                          kv_cache_shape_list: list[int],
-                          kv_cache_dtype_list: list[int],
-                          page_size_bytes: int,
-                          num_blocks: int):
+    def _adjust_kv_layout(
+        self,
+        raw_tensor: torch.Tensor,
+        kv_cache_shape_list: list[int],
+        kv_cache_dtype_list: list[int],
+        page_size_bytes: int,
+    ):
         reshaped_kv_tensors = []
         storage_offset_bytes = 0
         for shape, dtype in zip(kv_cache_shape_list, kv_cache_dtype_list):
@@ -2921,13 +2923,13 @@ class NPUModelRunner(GPUModelRunner):
             num_element_per_page = (
                 page_size_bytes // dtype_size
             )
-            target_shape = (num_blocks, *shape)
-            stride = torch.empty(target_shape).stride()
+
+            stride = torch.empty(shape).stride()
             target_stride = (num_element_per_page, *stride[1:])
             assert storage_offset_bytes % dtype_size == 0
             tensor = torch.as_strided(
                 raw_tensor.view(dtype),
-                size=target_shape,
+                size=shape,
                 stride=target_stride,
                 storage_offset=storage_offset_bytes // dtype_size,
             )
@@ -2961,7 +2963,7 @@ class NPUModelRunner(GPUModelRunner):
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                if self.use_compress and isinstance(current_kv_cache_spec, [MLAAttentionSpec, SlidingWindowMLASpec]):
+                if self.use_compress and isinstance(current_kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
                     kv_tensor = kv_cache_raw_tensors[layer_name]
                     sum_page_size_bytes = kv_tensor.numel()
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
@@ -2974,20 +2976,23 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec.head_size)
                     kv_cache_shape_list = [kv_cache_shape]
                     kv_cache_dtype_list = [current_kv_cache_spec.dtype]
-                    if current_kv_cache_spec.scale_dim != 0:
-                        indexer_k_shape = kv_cache_shape[:-2] + \
-                            [kv_cache_shape[-1] - current_kv_cache_spec.scale_dim]
-                        indexer_scale_shape = kv_cache_shape[:-2] + [current_kv_cache_spec.scale_dim]
+
+                    if hasattr(current_kv_cache_spec, "scale_dim") and current_kv_cache_spec.scale_dim != 0:
+                        indexer_k_shape = kv_cache_shape
+                        indexer_scale_shape = self.attn_backend.get_kv_cache_shape(
+                                                num_blocks, current_kv_cache_spec.block_size,
+                                                current_kv_cache_spec.num_kv_heads,
+                                                current_kv_cache_spec.scale_dim
+                                                )
                         kv_cache_shape_list = [indexer_k_shape, indexer_scale_shape]
                         kv_cache_dtype_list = [current_kv_cache_spec.dtype, current_kv_cache_spec.scale_dtype]
-                    kv_cache = self._adjust_kv_layout(raw_tensor,
+
+                    kv_cache = self._adjust_kv_layout(kv_tensor,
                                            kv_cache_shape_list,
                                            kv_cache_dtype_list,
                                            current_kv_cache_spec.page_size_bytes,
-                                           num_blocks,
                                            )
-                    # kv_size = sum_page_size_bytes - num_blocks * current_kv_cache_spec.page_size_padded
-                    # kv_cache = kv_tensor[:kv_size].view(current_kv_cache_spec.dtype).view(kv_cache_shape)
+
                     kv_caches[layer_name].append(kv_cache)
                 # encounter OOM issue
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
@@ -3193,9 +3198,10 @@ class NPUModelRunner(GPUModelRunner):
                 # block splitting. Get the supported block sizes from
                 # all backends in the group.
                 attn_groups = self.attn_groups[kv_cache_group_id]
+                backends = [attn_group.backend for attn_group in attn_groups]
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
                 selected_kernel_size = select_common_block_size(
-                    kv_manager_block_size, attn_groups
+                    kv_manager_block_size, backends
                 )
                 self.kernel_block_sizes.append([selected_kernel_size])
                 
@@ -3357,110 +3363,6 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         self.reorder_batch_threshold = reorder_batch_threshold_i  # noqa
 
-    def _get_kv_cache_spec_for_dsv4(self, layer_id, layer_name):
-        kv_cache_spec_list=[]
-        hf_config = self.model_config.hf_config
-        # NOTE: `pad_size` refers to `block_size * num_heads * head_dim * sizeof(dtype)`
-        # of indexer scale kvcache spec
-        pad_size = 1024 * 1 * 1 * 2
-        if layer_id in [0, 1] or "mtp" in layer_name:
-            # TODO(cmq): DON'T use magic number for the block size and pad_size
-            kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=128,
-                num_kv_heads=1,
-                head_size=hf_config.head_dim,
-                dtype=torch.bfloat16,
-                sliding_window=hf_config.window_size,
-                page_size_padded=0,
-            ))
-        elif layer_id % 2 == 0:
-            # TODO(cmq): DON'T use magic number for the block size
-            kv_cache_spec_list.append(MLAAttentionSpec(
-                block_size=128,
-                num_kv_heads=1,
-                head_size=hf_config.head_dim,
-                # nope_dim=hf_config.head_dim -
-                # hf_config.rope_head_dim,
-                # rope_dim=hf_config.rope_head_dim,
-                # scale_dim=0,
-                dtype=torch.bfloat16,
-                page_size_padded=0,
-                compress_ratio=1,
-            ))
-            # SWAAttentionSpec
-            kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=128,
-                num_kv_heads=1,
-                head_size=hf_config.head_dim,
-                dtype=torch.bfloat16,
-                sliding_window=hf_config.window_size,
-                page_size_padded=0,
-            ))
-            # this refers to C4 indexer spec
-            kv_cache_spec_list.append(MLAAttentionSpec(
-                block_size=128,
-                num_kv_heads=1,
-                head_size=hf_config.index_head_dim,
-                # indexer_scale_dim=1,
-                dtype=torch.int8,
-                # page_size_padded here be set to size of scale 
-                page_size_padded=512,
-                compress_ratio=1,
-            ))
-            # TODO(cmq): get window size from hf_config, instead of hard code in spec class
-            # C4AttnKVStateSpec + C4AttnScoreStateSpec
-            kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=4,
-                num_kv_heads=1,
-                head_size=hf_config.head_dim * 2 * 2,
-                dtype=torch.float32,
-                page_size_padded=512,
-                sliding_window=8,
-            ))
-            # C4IndexerKVStateSpec + C4IndexerScoreStateSpec
-            kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=16,
-                num_kv_heads=1,
-                head_size=hf_config.index_head_dim * 2 * 2,
-                dtype=torch.float32,
-                page_size_padded=512,
-                sliding_window=8,
-            ))
-        elif layer_id % 2 != 0:
-            # TODO(cmq): DON'T use magic number for the block size
-            # C128A
-            kv_cache_spec_list.append(MLAAttentionSpec(
-                block_size=128,
-                num_kv_heads=1,
-                head_size=hf_config.head_dim,
-                # nope_dim=hf_config.head_dim -
-                # hf_config.rope_head_dim,
-                # rope_dim=hf_config.rope_head_dim,
-                # scale_dim=0,
-                dtype=torch.bfloat16,
-                page_size_padded=0,
-            ))
-            # swa
-            kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=128,
-                num_kv_heads=1,
-                head_size=hf_config.head_dim,
-                dtype=torch.bfloat16,
-                sliding_window=hf_config.window_size,
-                page_size_padded=pad_size,
-            ))
-            # TODO(cmq): get window size from hf_config, instead of hard code in spec class
-            # C128AttnKVStateSpec + C128AttnScoreStateSpec
-            kv_cache_spec_list.append(SlidingWindowMLASpec(
-                block_size=16,
-                num_kv_heads=1,
-                head_size=hf_config.head_dim * 2,
-                dtype=torch.float32,
-                page_size_padded=65536,
-                sliding_window=128,
-            ))
-        return kv_cache_spec_list
-
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
@@ -3479,24 +3381,28 @@ class NPUModelRunner(GPUModelRunner):
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
         attn_layer_names = set()
-        for layer_id, (layer_name,
-                       attn_module) in enumerate(attn_layers.items()):
-            if isinstance(attn_module, Attention):
-                if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None:
-                    # The layer doesn't need its own KV cache and will use that of
-                    # the target layer. We skip creating a KVCacheSpec for it, so
-                    # that KV cache management logic will act as this layer does
-                    # not exist, and doesn't allocate KV cache for the layer. This
-                    # enables the memory saving of cross-layer kv sharing, allowing
-                    # a given amount of memory to accommodate longer context lengths
-                    # or enable more requests to be processed simultaneously.
-                    self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
-                    continue
 
+        for layer_name, attn_module in attn_layers.items():
+            if isinstance(attn_module, Attention) and (
+                kv_tgt_layer := attn_module.kv_sharing_target_layer_name
+            ):
+                # The layer doesn't need its own KV cache and will use that of
+                # the target layer. We skip creating a KVCacheSpec for it, so
+                # that KV cache management logic will act as this layer does
+                # not exist, and doesn't allocate KV cache for the layer. This
+                # enables the memory saving of cross-layer kv sharing, allowing
+                # a given amount of memory to accommodate longer context lengths
+                # or enable more requests to be processed simultaneously.
+                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                continue
+            elif self.use_compress:
+                # Skip modules that don't need KV cache (eg encoder-only attention)
+                if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                    kv_cache_spec_list[layer_name] = spec
+            elif isinstance(attn_module, Attention):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec_list[layer_name] = spec
                     attn_layer_names.add(layer_name)
-
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
                     # `MLAAttentionSpec` is temporarily patched to `AscendMLAAttentionSpec`.
@@ -3532,11 +3438,6 @@ class NPUModelRunner(GPUModelRunner):
 
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
-            elif isinstance(attn_module, DSAAttention):
-                kv_cache_spec_list[layer_name] = self._get_kv_cache_spec_for_dsv4(
-                    layer_id=layer_id,
-                    layer_name=layer_name,
-                )
 
         if len(mamba_layers) > 0:
             mamba_page_size_padded = 0

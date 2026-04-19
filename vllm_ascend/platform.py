@@ -517,9 +517,6 @@ class NPUPlatform(Platform):
         ):
             speculative_config.enforce_eager = False
 
-        if model_config and hasattr(model_config.hf_config, "compress_ratios"):
-            cache_config.block_size = 32
-
         if ascend_config.enable_mc2_hierarchy_comm and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication."

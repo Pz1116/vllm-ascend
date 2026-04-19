@@ -141,6 +141,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             torch.tensor([]) for _ in range(get_current_vllm_config(
             ).parallel_config.pipeline_parallel_size)
         ]
+        self.kv_cache_dtype = kv_cache_dtype
 
         self.use_sparse = True
 
@@ -166,12 +167,16 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        if self.compress_ratio <= 1:  # SWA part. Allocated separately as SVFSWACache.
+            return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype,
                                                      vllm_config.model_config)
         return MLAAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
+            block_size=128,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
+            model_version="svf",
+            compress_ratio=self.compress_ratio,
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
         )

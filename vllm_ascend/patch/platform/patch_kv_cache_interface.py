@@ -42,6 +42,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
        and is therefore saved in kv_cache[3].
     """
 
+    scale_dim: int = 0
+    scale_dtype: torch.dtype = torch.int8
     sparse_head_dim: tuple[int, ...] | None = None
     cache_sparse_c8: bool = False
     c8_k_cache_dtype: torch.dtype = torch.int8
@@ -67,7 +69,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             )
             return k_pe_nope_bytes + indexer_k_bytes + indexer_k_scale_bytes
 
-        return self.block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
+        return self.block_size * self.num_kv_heads * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
 
     @property
     def sparse_kv_cache_ratio(self) -> tuple[float, float, float, float | None]:
@@ -160,20 +162,14 @@ def _init_mla_cache_fields(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     #  for details.
     assert spec.num_kv_heads == 1, "MLAAttentionSpec only supports 1 head."
     # TODO(yifan): move this head size to bytes mapping to a utils file.
-    if spec.model_version == "v32":
-        # V3.2: 512B NoPE + 64*2B FP16 RoPE + 4*4B FP32 scale = 656B
-        # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
-        if spec.head_size == 576:
-            object.__setattr__(spec, "head_size", 656)
-            object.__setattr__(spec, "head_size_v", 656)
-        elif spec.head_size != 656:
-            raise ValueError(f"Invalid head size for V3.2: {spec.head_size}")
-    elif spec.model_version == "svf":
+    if spec.model_version == "svf":
         # we should have a scale dim here.
         # we should have dtype of scale and k of indexer here.
         # NOTE(zyj): patch modifies here
+        # TODO(cmq): adapt this for A5
         HEAD_DIM_TO_BLOCK_BYTES: dict[int, int] = {
-            128: 129,  # SVF: 128B NoPE, 1B scale
+            128: 260,   # SVF: 128*2B NoPE, 4B for fp32 scale = 260B
+            512: 1024,  # SVF: 512*2B NoPE + RoPE = 1024B
         }
 
         if spec.head_size in HEAD_DIM_TO_BLOCK_BYTES:
@@ -194,6 +190,8 @@ def _init_mla_cache_fields(spec: MLAAttentionSpec | SlidingWindowMLASpec):
         #         object.__setattr__(spec, "page_size_padded", padded_page_size)
 
         if get_ascend_device_type() == AscendDeviceType.A5:
+            # TODO(zyj): FIXME(qcs): this is a bug to just use real_page_size_bytes, 
+            # cause the page_size_padded will be overrided by this operation
             actual_page_size = spec.real_page_size_bytes
             padded_page_size = round_up(actual_page_size, 128)
             if padded_page_size != actual_page_size:

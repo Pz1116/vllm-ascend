@@ -66,7 +66,7 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
-from vllm.model_executor.models.deepseek_compressor import CompressorStateCache
+from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
@@ -452,16 +452,7 @@ class Indexer(nn.Module):
         ascend_device_type = get_ascend_device_type()
         k_dtype = torch.fp8 if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
 
-        if self.compress_ratio == 1:
-            # NOTE(yifan): for head_dim of fp8 kv cache, we handle quantization
-            # format and scale factor in the MLAAttentionSpec
-            self.k_cache = DeepseekV32IndexerCache(
-                head_dim=self.head_dim,
-                dtype=k_dtype,
-                prefix=f"{prefix}.k_cache",
-                cache_config=cache_config,
-            )
-        else:
+        if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
             self.k_cache = DeepseekV32IndexerCache(
                 head_dim=self.head_dim,
@@ -470,17 +461,17 @@ class Indexer(nn.Module):
                 cache_config=cache_config,
                 compress_ratio=self.compress_ratio,
             )
-            self.compressor = None
-            if self.compress_ratio > 1:
-                self.compressor = Compressor(
-                    vllm_config,
-                    config,
-                    self.compress_ratio,
-                    self.head_dim,
-                    True,
-                    quant_config=quant_config,
-                    cache_config=cache_config,
-                    prefix=f"{prefix}.compressor")  #Compressor(4, 128)
+        self.compressor = None
+        if self.compress_ratio > 1:
+            self.compressor = Compressor(
+                vllm_config,
+                config,
+                self.compress_ratio,
+                head_dim=self.head_dim,
+                rotate=True,
+                quant_config=quant_config,
+                cache_config=cache_config,
+                prefix=f"{prefix}.compressor")  #Compressor(4, 128)
 
     def forward(self, hidden_states: torch.Tensor, qr: torch.Tensor, positions,
                 rotary_emb) -> torch.Tensor:
@@ -511,15 +502,15 @@ class Compressor(nn.Module):
         self.overlap = compress_ratio == 4
         self.rotate = rotate
         self.norm_eps = config.norm_eps
-        coff = 1 + self.overlap
+        self.coff = 1 + self.overlap
 
         self.ape = nn.Parameter(
             torch.empty(compress_ratio,
-                        coff * self.head_dim,
+                        self.coff * self.head_dim,
                         dtype=torch.float32))
         self.wkv = ReplicatedLinear(
             self.dim,
-            coff * self.head_dim,
+            self.coff * self.head_dim,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.wkv",
@@ -527,7 +518,7 @@ class Compressor(nn.Module):
         )
         self.wgate = ReplicatedLinear(
             self.dim,
-            coff * self.head_dim,
+            self.coff * self.head_dim,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.wgate",
@@ -536,29 +527,31 @@ class Compressor(nn.Module):
         self.norm = RMSNorm(self.head_dim, config.norm_eps)
 
         state_dtype = torch.float32
-        # TODO(zyj): change following codes if block_size is configurable
+        # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
         if compress_ratio == 4:
-            self.state_cache = CompressorStateCache(
-                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-                dtype=state_dtype,
-                compress_ratio=compress_ratio,
-                prefix=f"{prefix}.state_cache",
-                block_size=4
-            )
-            self.indexer_state_cache = CompressorStateCache(
-                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-                dtype=state_dtype,
-                compress_ratio=compress_ratio,
-                prefix=f"{prefix}.indexer_state_cache",
-                block_size=16
-            )
+            if head_dim == 512:
+                self.state_cache = CompressorStateCache(
+                    state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                    dtype=state_dtype,
+                    compress_ratio=compress_ratio,
+                    prefix=f"{prefix}.state_cache",
+                    block_size=4,
+                )
+            else:
+                self.indexer_state_cache = CompressorStateCache(
+                    state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                    dtype=state_dtype,
+                    compress_ratio=compress_ratio,
+                    prefix=f"{prefix}.indexer_state_cache",
+                    block_size=4
+                )
         elif compress_ratio == 128:
             self.state_cache = CompressorStateCache(
-                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                state_dim=self.head_dim,  # kv_state + score_state
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",
-                block_size=16
+                block_size=32
             )
         else:
             raise ValueError(f"Only support compress_ratio in [4, 128]. Got unsupported compress_ratio: {compress_ratio}")
@@ -714,11 +707,11 @@ class DeepseekV4Attention(nn.Module):
                 vllm_config,
                 config,
                 self.compress_ratio,
-                self.head_dim,
+                head_dim=self.head_dim,
                 quant_config=quant_config,
                 cache_config=cache_config,
-                prefix=f"{prefix}.compressor",
-            )
+                prefix=f"{prefix}.compressor")  #Compressor(4, 128)
+
             if self.compress_ratio == 4:
                 self.indexer = Indexer(
                     vllm_config,

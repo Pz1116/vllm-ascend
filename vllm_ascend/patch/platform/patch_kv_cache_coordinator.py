@@ -19,7 +19,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, FullAttentionSpec
 
-from vllm_ascend.core.multi_block_pool import MultiBlockPool
 from vllm_ascend.core.single_type_kv_cache_manager import \
     get_manager_for_kv_cache_spec
 from math import lcm
@@ -44,11 +43,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         dcp_world_size: int,
         pcp_world_size: int,
         hash_block_size: int,
+        eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        # TODO(cmq): adapt the eagle logic or use the upstream fix?
+        self.eagle_attn_layer_names = eagle_attn_layer_names or []
 
         self.block_pool = BlockPool(
             kv_cache_config.num_blocks,
@@ -216,6 +218,7 @@ def get_kv_cache_coordinator(
     dcp_world_size: int,
     pcp_world_size: int,
     hash_block_size: int,
+    eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
     return AscendHybridKVCacheCoordinator(
@@ -227,6 +230,7 @@ def get_kv_cache_coordinator(
         dcp_world_size=dcp_world_size,
         pcp_world_size=pcp_world_size,
         hash_block_size=hash_block_size,
+        eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
     )
 
