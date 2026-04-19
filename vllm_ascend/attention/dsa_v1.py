@@ -1094,7 +1094,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         need_gather_q_kv: bool = False,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return output.fill_(0)
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
