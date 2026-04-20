@@ -1190,17 +1190,38 @@ class AscendDSAImpl(DSAAttentionImpl):
             # ['indexer.k_cache', 'attn', 'swa_cache', 'compressor.state_cache', 'indexer.compressor.indexer_state_cache']
             (_, compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata, _) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
+            while isinstance(compress_kv_cache, list):
+                # FIXME(zyj): why the kvcache is a 3-dim list?
+                compress_kv_cache = compress_kv_cache[0]
+            while isinstance(state_cache, list):
+                # FIXME(zyj): why the kvcache is a 3-dim list?
+                state_cache = state_cache[0]
+
         elif self.compress_ratio == 128:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             # ['attn', 'swa_cache', 'compressor.state_cache']
             (compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
+
+            while isinstance(compress_kv_cache, list):
+                # FIXME(zyj): why the kvcache is a 3-dim list?
+                compress_kv_cache = compress_kv_cache[0]
+            while isinstance(state_cache, list):
+                # FIXME(zyj): why the kvcache is a 3-dim list?
+                state_cache = state_cache[0]
+
         else:
             (_, swa_kv_cache, _, _, _, _,) = kv_cache
             # ['swa_cache']
             (swa_metadata,) = attn_metadata
             compress_common_attn_metadata = swa_metadata
-        
+
+        while isinstance(swa_kv_cache, list):
+            # FIXME(zyj): why the kvcache is a 3-dim list?
+            # print(f"before: {swa_kv_cache=}")
+            swa_kv_cache = swa_kv_cache[0]
+            # print(f"after: {swa_kv_cache=}")
+
         assert compress_common_attn_metadata.prefill is not None
         cos = compress_common_attn_metadata.prefill.cos[layer_name]
         sin = compress_common_attn_metadata.prefill.sin[layer_name]
@@ -1271,8 +1292,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 compress_sin.view(-1, compress_sin.shape[-1]),
                 compress_cos.view(-1, compress_cos.shape[-1]),
                 # TODO(lxs): adapt the block table
-                kv_block_table=compressor_kv_state_metadata.prefill.block_table,
-                score_block_table=compressor_score_state_metadata.prefill.block_table,
+                block_table=compressor_kv_state_metadata.prefill.block_table,
                 cu_seqlens=actual_seq_lengths_query,
                 seqused=None,
                 start_pos=compress_common_attn_metadata.prefill.start_pos,
@@ -1374,10 +1394,26 @@ class AscendDSAImpl(DSAAttentionImpl):
             # ['indexer.k_cache', 'attn', 'swa_cache', 'compressor.state_cache', 'indexer.compressor.indexer_state_cache']
             (_, compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata, _) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
+
+            while isinstance(compress_kv_cache, list):
+                # FIXME(zyj): why the kvcache is a 3-dim list?
+                compress_kv_cache = compress_kv_cache[0]
+            while isinstance(state_cache, list):
+                # FIXME(zyj): why the kvcache is a 3-dim list?
+                state_cache = state_cache[0]
+
         elif self.compress_ratio == 128:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             # ['attn', 'swa_cache', 'compressor.state_cache']
             (compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata) = attn_metadata
+
+            while isinstance(compress_kv_cache, list):
+                # FIXME(zyj): why the kvcache is a 3-dim list?
+                compress_kv_cache = compress_kv_cache[0]
+            while isinstance(state_cache, list):
+                # FIXME(zyj): why the kvcache is a 3-dim list?
+                state_cache = state_cache[0]
+
             compress_common_attn_metadata = compressor_attn_metadata
         else:
             (_, swa_kv_cache, _, _, _, _) = kv_cache
@@ -1388,7 +1424,11 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = compress_common_attn_metadata.decode.sin[layer_name]
         actual_seq_lengths_query = compress_common_attn_metadata.decode.query_start_loc
         actual_seq_lengths_key = compress_common_attn_metadata.decode.seq_lens
-
+        while isinstance(swa_kv_cache, list):
+            # FIXME(zyj): why the kvcache is a 3-dim list?
+            # print(f"before: {swa_kv_cache=}")
+            swa_kv_cache = swa_kv_cache[0]
+            # print(f"after: {swa_kv_cache=}")
         wait_hidden_state_cal_event = torch.npu.current_stream().record_event() \
             if self.multistream_dsa_preprocess else None
 
@@ -1484,8 +1524,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 self.compressor_norm.weight,
                 compress_sin.view(-1, compress_sin.shape[-1]),
                 compress_cos.view(-1, compress_cos.shape[-1]),
-                kv_block_table=compressor_kv_state_metadata.decode.block_table,
-                score_block_table=compressor_score_state_metadata.decode.block_table,
+                block_table=compressor_kv_state_metadata.decode.block_table,
                 cu_seqlens=actual_seq_lengths_query,
                 seqused=None,
                 start_pos=compress_common_attn_metadata.decode.start_pos,
@@ -1572,7 +1611,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         with_prefill: bool = False,
         qr_pertoken_scale: torch.Tensor = None,
     ):
-        (_, _,_, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache) = kv_cache
+        (_, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache) = kv_cache
         (indexer_kv_scale_metadata, _, _, _, indexer_kv_state_metadata) = attn_metadata
 
         if (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
@@ -1607,12 +1646,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         if with_prefill:
             assert indexer_kv_scale_metadata.prefill is not None
             kv_block_table = indexer_kv_state_metadata.prefill.block_table
-            score_block_table = indexer_kv_score_state_metadata.prefill.block_table
             start_pos = indexer_kv_scale_metadata.prefill.start_pos
         else:
             assert indexer_kv_scale_metadata.decode is not None
             kv_block_table = indexer_kv_state_metadata.decode.block_table
-            score_block_table = indexer_kv_score_state_metadata.decode.block_table
             start_pos = indexer_kv_scale_metadata.decode.start_pos
 
         kv, _, _, _, _ = torch.ops._C_ascend.compressor(
@@ -1624,8 +1661,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             self.indexcom_norm.weight,
             compressed_sin.view(-1, compressed_sin.shape[-1]),
             compressed_cos.view(-1, compressed_cos.shape[-1]),
-            kv_block_table=kv_block_table,
-            score_block_table=score_block_table,
+            block_table=kv_block_table,
             cu_seqlens=actual_seq_lengths_query,
             seqused=None,
             start_pos=start_pos,
