@@ -1176,14 +1176,17 @@ class AscendDSAImpl(DSAAttentionImpl):
         compress_common_attn_metadata = None
         if self.compress_ratio == 4:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
-            (swa_metadata, compressor_attn_metadata, _, compressor_kv_state_metadata, compressor_score_state_metadata, _, _) = attn_metadata
+            # ['indexer.k_cache', 'attn', 'swa_cache', 'compressor.state_cache', 'indexer.compressor.indexer_state_cache']
+            (_, compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata, _) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         elif self.compress_ratio == 128:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
-            (swa_metadata, compressor_attn_metadata, compressor_kv_state_metadata, compressor_score_state_metadata) = attn_metadata
+            # ['attn', 'swa_cache', 'compressor.state_cache']
+            (compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         else:
             (_, swa_kv_cache, _, _, _, _,) = kv_cache
+            # ['swa_cache']
             (swa_metadata,) = attn_metadata
             compress_common_attn_metadata = swa_metadata
         
@@ -1355,27 +1358,19 @@ class AscendDSAImpl(DSAAttentionImpl):
         assert attn_metadata[0].decode is not None
         compress_common_attn_metadata = None
 
-        # if self.compress_ratio == 4:
-        #     (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
-        #     (swa_metadata, compressor_attn_metadata, _, compressor_kv_state_metadata, compressor_score_state_metadata, _, _) = attn_metadata
-        #     compress_common_attn_metadata = compressor_attn_metadata
-        # elif self.compress_ratio == 128:
-        #     (compress_kv_cache, swa_kv_cache, kv_state_cache, score_state_cache, _, _, _, _) = kv_cache
-        #     (swa_metadata, compressor_attn_metadata, compressor_kv_state_metadata, compressor_score_state_metadata) = attn_metadata
-        #     compress_common_attn_metadata = compressor_attn_metadata
-        # else:
-        #     (swa_metadata,) = attn_metadata
-        #     compress_common_attn_metadata = swa_metadata
         if self.compress_ratio == 4:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
-            (swa_metadata, compressor_attn_metadata, _, compressor_kv_state_metadata, compressor_score_state_metadata, _, _) = attn_metadata
+            # ['indexer.k_cache', 'attn', 'swa_cache', 'compressor.state_cache', 'indexer.compressor.indexer_state_cache']
+            (_, compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata, _) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         elif self.compress_ratio == 128:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
-            (swa_metadata, compressor_attn_metadata, compressor_kv_state_metadata, compressor_score_state_metadata) = attn_metadata
+            # ['attn', 'swa_cache', 'compressor.state_cache']
+            (compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
         else:
             (_, swa_kv_cache, _, _, _, _) = kv_cache
+            # ['swa_cache']
             (swa_metadata,) = attn_metadata
             compress_common_attn_metadata = swa_metadata
         cos = compress_common_attn_metadata.decode.cos[layer_name]
@@ -1567,7 +1562,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         qr_pertoken_scale: torch.Tensor = None,
     ):
         (_, _,_, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache) = kv_cache
-        (_, _, indexer_kv_scale_metadata, _, _, indexer_kv_state_metadata, indexer_kv_score_state_metadata) = attn_metadata
+        (indexer_kv_scale_metadata, _, _, _, indexer_kv_state_metadata) = attn_metadata
 
         if (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
             isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod) and \

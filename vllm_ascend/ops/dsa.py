@@ -186,7 +186,7 @@ def dsa_forward(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     if forward_context.attn_metadata:
-        attn_metadata = forward_context.attn_metadata[self.dsa_attn.layer_name]
+        attn_metadata = filter_metadata(forward_context.attn_metadata, self.prefix)
     else:
         attn_metadata = forward_context.attn_metadata
 
@@ -241,3 +241,7 @@ direct_register_custom_op(
     fake_impl=dsa_forward_fake,
     dispatch_key="PrivateUse1",
 )
+
+def filter_metadata(metadata, prefix):
+    # filter using prefix and remove prefix.
+    return [v[0] for k, v in metadata.items() if k.startswith(prefix)]
