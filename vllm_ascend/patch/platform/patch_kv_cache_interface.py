@@ -151,7 +151,7 @@ def _init_mla_cache_fields(spec: MLAAttentionSpec | SlidingWindowMLASpec):
         return
     assert spec.model_version in MODEL_VERSIONS, "Invalid model version."
     assert (spec.model_version == "v32" and spec.compress_ratio == 1) or (
-        spec.model_version == "svf" and spec.compress_ratio in [1, 4, 128]
+        spec.model_version == "svf" and spec.compress_ratio in [0, 4, 128]
     ), "Invalid compress ratio."
     if spec.compress_ratio > 1:
         assert spec.block_size % spec.compress_ratio == 0, (
