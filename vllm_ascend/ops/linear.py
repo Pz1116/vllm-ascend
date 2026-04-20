@@ -38,6 +38,9 @@ from vllm.model_executor.layers.linear import (  # noqa
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.layers.utils import (
+    dispatch_unquantized_gemm,
+)
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import enable_sp, maybe_trans_nz
@@ -50,6 +53,14 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
         super().process_weights_after_loading(layer)
         if "conv1d" not in layer.prefix:
             layer.weight.data = maybe_trans_nz(layer.weight.data)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
 
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
@@ -232,6 +243,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         input_is_parallel: bool = True,
         skip_bias_add: bool = False,
         params_dtype: torch.dtype | None = None,
+        out_dtype: torch.dtype | None = None,
         reduce_results: bool = True,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -256,6 +268,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
+        self.out_dtype = out_dtype
 
         AscendLinearBase.__init__(
             self,
