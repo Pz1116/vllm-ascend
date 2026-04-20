@@ -27,6 +27,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
 
     CUSTOM_OPS_ARRAY=(
+        "scatter_nd_update_v2"
         "moe_grouped_matmul"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer_vllm"
@@ -105,6 +106,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
     
     CUSTOM_OPS_ARRAY=(
+        "scatter_nd_update_v2"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer_vllm"
         "sparse_flash_attention"

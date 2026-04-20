@@ -1071,6 +1071,14 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
+void npu_scatter_nd_update_v2_meta(
+    at::Tensor& var,
+    const at::Tensor& indices,
+    const at::Tensor& update)
+{
+    return;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1132,5 +1140,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // npu_scatter_nd_update_v2
+    ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
 }
 }
