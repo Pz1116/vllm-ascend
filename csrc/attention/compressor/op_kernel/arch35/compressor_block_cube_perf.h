@@ -51,7 +51,7 @@ public:
 private:
     using T = float;
     using X_T = typename AscendC::Conditional<COMP::xDtype == X_DTYPE::BF16, bfloat16_t, half>::type;
-
+    
     __aicore__ inline uint32_t GetMSize(const RunInfo &info, uint32_t coffId);
     __aicore__ inline void CopyXGmToL1(const RunInfo &info, LocalTensor<X_T> xL1Tensor, uint32_t hIdx, uint32_t kBase);
     __aicore__ inline void CopyWeightGmToL1(LocalTensor<X_T> wL1Tensor,
@@ -113,12 +113,13 @@ private:
     // mmad <> fixpipe EventID
     static constexpr uint32_t L0C_EVENT0 = EVENT_ID0;   // 每块L0C单独分配EVENT_ID
     static constexpr uint32_t L0C_EVENT1 = EVENT_ID1;
+    static constexpr uint32_t L0C_EVENT2 = EVENT_ID2;
+    static constexpr uint32_t L0C_EVENT3 = EVENT_ID3;
     uint32_t l0cBufId = 0;
 
     // =================================Loop======================================
     uint32_t curBIdx_ = 0;
     uint32_t curSIdx_ = 0;
-
 };
 
 template <typename COMP>
@@ -170,7 +171,8 @@ __aicore__ inline void CompressorBlockCubePerf<COMP>::InitBuffers(TPipe *pipe)
     // L0
     pipe->InitBuffer(tmpBufL0A, L0A_PP_SIZE * 2);
     pipe->InitBuffer(tmpBufL0B, L0B_PP_SIZE * 2);
-    pipe->InitBuffer(tmpBufL0C, L0C_PP_SIZE * 2);
+    pipe->InitBuffer(tmpBufL0C, L0C_PP_SIZE * 4);
+
 }
 
 template <typename COMP>
@@ -196,6 +198,8 @@ __aicore__ inline void CompressorBlockCubePerf<COMP>::AllocEventID(TPipe *pipe)
 
     SetFlag<HardEvent::FIX_M>(L0C_EVENT0);
     SetFlag<HardEvent::FIX_M>(L0C_EVENT1);
+    SetFlag<HardEvent::FIX_M>(L0C_EVENT2);
+    SetFlag<HardEvent::FIX_M>(L0C_EVENT3);
 }
 
 template <typename COMP>
@@ -214,6 +218,8 @@ __aicore__ inline void CompressorBlockCubePerf<COMP>::FreeEventID(TPipe *pipe)
 
     WaitFlag<HardEvent::FIX_M>(L0C_EVENT0);
     WaitFlag<HardEvent::FIX_M>(L0C_EVENT1);
+    WaitFlag<HardEvent::FIX_M>(L0C_EVENT2);
+    WaitFlag<HardEvent::FIX_M>(L0C_EVENT3);
 }
 
 template <typename COMP>
@@ -257,17 +263,17 @@ __aicore__ inline void CompressorBlockCubePerf<COMP>::LoadAToL0(const RunInfo &i
 
     uint32_t mSizeAlign = Align(mSize, 16U);
     uint32_t xTensorOffset = kStart * mSizeAlign + mStart * (32 / sizeof(X_T));
-    uint32_t mLoop = Align(mDealSize, 16U) / 16;
+    uint32_t mDealSizeAlign = Align(mDealSize, 16U);
 
-    for (uint32_t i = 0; i < mLoop; i++) {
-        LoadData2DParams loadData2DParams;
-        loadData2DParams.startIndex = i;
-        loadData2DParams.repeatTimes = kBase / (32 / sizeof(X_T));
-        loadData2DParams.srcStride = mSizeAlign / 16;
-        loadData2DParams.dstGap = 0;
-        loadData2DParams.ifTranspose = false;
-        LoadData(aL0Tensor[i * 16 * kBase], xL1Tensor[xTensorOffset], loadData2DParams); // 16: 一个分型的行数
-    }
+    LoadData2DParamsV2 loadData2DParamsV2;
+    loadData2DParamsV2.mStartPosition = 0;
+    loadData2DParamsV2.kStartPosition = 0;
+    loadData2DParamsV2.mStep = mDealSizeAlign / 16;
+    loadData2DParamsV2.kStep = kBase / (32 / sizeof(X_T));
+    loadData2DParamsV2.srcStride = mSizeAlign / 16;
+    loadData2DParamsV2.dstStride = loadData2DParamsV2.mStep;
+    loadData2DParamsV2.ifTranspose = false;
+    LoadData(aL0Tensor, xL1Tensor[xTensorOffset], loadData2DParamsV2);
 }
 
 template <typename COMP>
@@ -318,9 +324,7 @@ __aicore__ inline void CompressorBlockCubePerf<COMP>::CopyOutMm1Res(const RunInf
 
     Fixpipe(kvMm1ResGm[gmOffset], cL0Tensor[kvOffset], fixParams);
     Fixpipe(scoreMm1ResGm[gmOffset], cL0Tensor[scoreOffset], fixParams);
-
 }
-
 
 template <typename COMP>
 __aicore__ inline uint32_t CompressorBlockCubePerf<COMP>::GetMSize(const RunInfo &info, uint32_t coffId)
