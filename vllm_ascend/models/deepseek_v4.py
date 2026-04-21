@@ -450,7 +450,7 @@ class Indexer(nn.Module):
             return_bias=False,
         )
         ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.fp8 if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
+        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.int8
 
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
@@ -529,25 +529,16 @@ class Compressor(nn.Module):
         state_dtype = torch.float32
         # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
         if compress_ratio == 4:
-            if head_dim == 512:
-                self.state_cache = CompressorStateCache(
-                    state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-                    dtype=state_dtype,
-                    compress_ratio=compress_ratio,
-                    prefix=f"{prefix}.state_cache",
-                    block_size=4,
-                )
-            else:
-                self.indexer_state_cache = CompressorStateCache(
-                    state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-                    dtype=state_dtype,
-                    compress_ratio=compress_ratio,
-                    prefix=f"{prefix}.indexer_state_cache",
-                    block_size=4
-                )
+            self.state_cache = CompressorStateCache(
+                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
+                dtype=state_dtype,
+                compress_ratio=compress_ratio,
+                prefix=f"{prefix}.state_cache",
+                block_size=2,
+            )
         elif compress_ratio == 128:
             self.state_cache = CompressorStateCache(
-                state_dim=self.head_dim,  # kv_state + score_state
+                state_dim=2 * self.head_dim,  # kv_state + score_state
                 dtype=state_dtype,
                 compress_ratio=compress_ratio,
                 prefix=f"{prefix}.state_cache",

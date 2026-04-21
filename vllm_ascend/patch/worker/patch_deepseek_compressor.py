@@ -52,7 +52,7 @@ class AscendCompressorStateCache(CompressorStateCache):
 
 
     def get_kv_cache_spec(self, vllm_config) -> KVCacheSpec:
-        page_size_padded = 0 if self.state_dim == 1024 and self.compress_ratio == 4 else 122880
+        page_size_padded = 16640 if self.state_dim == 2*1024 and self.compress_ratio == 4 else 131072
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
@@ -95,7 +95,7 @@ class AscendDeepseekV32IndexerCache(DeepseekV32IndexerCache):
             # TODO(zyj): refactor this magic number
             # page_size_padded=33280,
             scale_dim=1 if self.head_dim == 128 else 0,
-            scale_dtype=torch.float32,
+            scale_dtype=torch.float16,
         )
 
     def forward(self): ...

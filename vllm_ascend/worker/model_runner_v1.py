@@ -2993,6 +2993,9 @@ class NPUModelRunner(GPUModelRunner):
                                            current_kv_cache_spec.page_size_bytes,
                                            )
 
+                    if len(kv_cache) == 1:
+                        # TODO(zyj): this is not work, fix me.
+                        kv_cache = kv_cache[0]
                     kv_caches[layer_name].append(kv_cache)
                 # encounter OOM issue
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
