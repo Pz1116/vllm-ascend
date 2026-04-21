@@ -1490,7 +1490,7 @@ void npu_scatter_nd_update_v2(
     const at::Tensor& update)
 {
     // construct the output tensor
-    int64_t var_stride = var.stride(0);
+    auto var_stride = var.stride();
     EXEC_NPU_CMD(aclnnScatterNdUpdateV2, var, indices, update, var_stride);
     return;
 }
