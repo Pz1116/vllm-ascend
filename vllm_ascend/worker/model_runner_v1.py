@@ -2214,7 +2214,9 @@ class NPUModelRunner(GPUModelRunner):
                     extra_attn_metadata_args = dict(
                         compress_ratio=compress_ratio,
                         num_reqs_actual=num_reqs_actual,
-                        ratio_to_sas_metadata=ratio_to_sas_metadata,)
+                        ratio_to_sas_metadata=ratio_to_sas_metadata,
+                        block_size=attn_group.kv_cache_spec.block_size,
+                        )
 
             if for_cudagraph_capture and not isinstance(builder, AscendDSAMetadataBuilder):
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)

@@ -274,6 +274,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     decode_sas_metadata: Optional[torch.Tensor] = None
     decode_qli_metadata: Optional[torch.Tensor] = None
     ratio_to_sas_metadata: Optional = None
+    block_size: Optional[int] = 128
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -442,6 +443,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         query_start_loc = common_attn_metadata.query_start_loc
         num_reqs_actual = kwargs.get("num_reqs_actual", None)
         self.ratio_to_sas_metadata = kwargs.get("ratio_to_sas_metadata", None)
+        self.block_size = kwargs.get("block_size", 128)
 
         self.num_decodes, self.num_prefills, self.num_decode_tokens, self.num_prefill_tokens = \
             split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
@@ -460,12 +462,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos, sin = get_cos_and_sin_dsa(input_positions, True)
 
         # NOTE: Currently, MTP-fullgraph is incompatibility pcp
-        self.slot_mapping = common_attn_metadata.slot_mapping[:
+        slot_mapping = common_attn_metadata.slot_mapping[:
                                                               num_input_tokens]
-        # slot_mapping = slot_mapping.reshape(-1, 1)
-        # print("BBBBBBBBBBBBBBB", f"{slot_mapping=}")
         self.slot_mapping = torch.stack([slot_mapping // self.block_size, slot_mapping % self.block_size], axis=-1)
-        # print("AAAAAAAAAAAAAAAA", f"{self.block_size=}, {self.slot_mapping=}")
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -1260,10 +1259,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
 
         # swa exec kv
-        torch_npu.npu_scatter_nd_update_(
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(
             swa_kv_cache,
             swa_metadata.prefill.slot_mapping, kv)
-        # print("FFFFFFFFFFFFFFF", f"{swa_metadata.prefill.slot_mapping=}, {swa_kv_cache.mean()=}")
 
         compress_cos = compress_common_attn_metadata.prefill.compress_cos[layer_name]
         compress_sin = compress_common_attn_metadata.prefill.compress_sin[layer_name]
@@ -1292,7 +1290,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 self.compressor_wgate.weight,
                 # TODO(yilin): adapt to the latest operator
                 state_cache.squeeze(-2),
-                # score_state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
                 compress_sin.view(-1, compress_sin.shape[-1]),

@@ -1418,7 +1418,11 @@ def get_compressed_pos_and_indices(
     
     for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
         # Calculate compressed length of historical & total tokens
-        compress_ratio = getattr(kv_cache_group_spec.kv_cache_spec, "compress_ratio", 1)
+        if isinstance(kv_cache_group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
+            kv_cache_spec = next(iter(kv_cache_group_spec.kv_cache_spec.kv_cache_specs.values()))
+        else:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        compress_ratio = getattr(kv_cache_spec, "compress_ratio", 1)
 
         # Note(qcs): some models use compress_ratio=0 as non-compression tag.
         if compress_ratio > 1:
