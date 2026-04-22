@@ -116,7 +116,7 @@ public:
             DataCopyPad(updateLocal, updatesGm_[gmOffset], updateCopyParams, padParams);
             PipeMte2ToS();
 
-            uint64_t outOffset = linearIndex * scatterLength_ + tileIdx * scatterTileLength_;
+            uint64_t outOffset = linearIndex + tileIdx * scatterTileLength_;
             DataCopyExtParams outParams{1, static_cast<uint32_t>(tileLength * sizeof(T)), 0, 0, 0};
             DataCopyPad(outputGm_[outOffset], updateLocal, outParams);
             PipeMte3ToS();

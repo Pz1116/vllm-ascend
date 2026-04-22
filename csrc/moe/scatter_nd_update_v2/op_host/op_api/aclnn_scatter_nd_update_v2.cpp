@@ -93,7 +93,7 @@ static aclnnStatus CheckParams(aclTensor *varRef, const aclTensor *indices, cons
 
 aclnnStatus aclnnScatterNdUpdateV2GetWorkspaceSize(aclTensor *varRef, const aclTensor *indices, const aclTensor *updates,
                                                  const aclIntArray *strides, uint64_t* workspaceSize, aclOpExecutor** executor) {
-  L2_DFX_PHASE_1(aclnnScatterNdUpdateV2, DFX_IN(varRef, indices, updates, strides), DFX_OUT(varRef));
+  L2_DFX_PHASE_1(aclnnScatterNdUpdateV2, DFX_IN(varRef, indices, updates), DFX_OUT(varRef));
 
   // 固定写法，创建OpExecutor
   auto uniqueExecutor = CREATE_EXECUTOR();

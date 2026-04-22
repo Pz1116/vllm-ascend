@@ -125,7 +125,7 @@ inline void ScatterNdUpdateV2Tiling::Tiling4LinearIndex(uint64_t indexRow, uint6
     auto attrs = tilingContext_->GetAttrs();
     auto stridesPtr = attrs->GetListInt(ATTR_STRIDE);
     for (uint64_t i = 0; i < indexDim; ++i) {
-        indicesMask_[i] = static_cast<uint64_t>(stridesPtr->GetData()[i]) / scatterLength_;
+        indicesMask_[i] = static_cast<uint64_t>(stridesPtr->GetData()[i]);
     }
     uint64_t coeff = isInt64Indices_ ? (2 * indexDim + 3) : (indexDim + 3);
     uint64_t maxBlockLength = ubSize_ / coeff / sizeof(int);
@@ -316,9 +316,8 @@ ge::graphStatus ScatterNdUpdateV2Tiling::Init()
     uint64_t totalLength = 1;
     for (uint64_t i = 0; i < indexDim_; ++i) {
         totalLength *= varRefShape.GetDim(i);
-        OP_LOGD(tilingContext_, "totalLength varRefShape[%d]=%d", i, varRefShape.GetDim(i));
     }
-    
+
     if (isInt64Indices_) {
         needLargeIndexKernel_ = !IsLinearIndex(totalLength);
     }
@@ -326,7 +325,6 @@ ge::graphStatus ScatterNdUpdateV2Tiling::Init()
     if (varDimNum > indexDim_) {
         for (uint64_t i = indexDim_; i < varDimNum; i++) {
             scatterLength_ *= varRefShape.GetDim(i);
-            OP_LOGD(tilingContext_, "scatterLength_ varRefShape[%ld]=%ld", i, varRefShape.GetDim(i));
         }
     }
     uint64_t indexRow = 1;
@@ -346,10 +344,15 @@ ge::graphStatus ScatterNdUpdateV2Tiling::Init()
     coreNum_ = coreNum_ == 0 ? 1 : coreNum_;
     ubSize_ = compileInfo->ubSizePlatForm;
     GetDtypeSize();
+    Tiling4LinearIndex(indexRow, indexDim_);
     SetTilingKeyMode();
     tilingContext_->SetScheduleMode(1);
-    Tiling4LinearIndex(indexRow, indexDim_);
-    Tiling4Scatter(totalLength, indexRow);
+    uint64_t maxPhysicalOffset = 0;
+    for (uint64_t i = 0; i < indexDim_; ++i) {
+        maxPhysicalOffset += (varRefShape.GetDim(i) - 1) * indicesMask_[i];
+    }
+    uint64_t totalPhysicalRange = maxPhysicalOffset + scatterLength_;
+    Tiling4Scatter(totalPhysicalRange, indexRow);
     size_t* currentWorkSpace = tilingContext_->GetWorkspaceSizes(1);
     currentWorkSpace[0] = CalcWorkSpaceSize(indexRow);
     OP_LOGD(tilingContext_, "Tiling inited");

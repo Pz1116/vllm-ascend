@@ -47,7 +47,7 @@ inline static bool IsAiCoreSupport(const aclTensor* self) {
 inline static const aclTensor* ScatterNdUpdateV2AiCore(const aclTensor* self, const aclTensor* indices,
                                                      const aclTensor* updates, const aclIntArray* strides, bool use_locking,
                                                      aclOpExecutor* executor) {
-  L0_DFX(ScatterNdUpdateV2AiCore, self, indices, updates, strides, use_locking);
+  L0_DFX(ScatterNdUpdateV2AiCore, self, indices, updates, use_locking);
   auto retAicore =
     ADD_TO_LAUNCHER_LIST_AICORE(ScatterNdUpdateV2,
                                 OP_INPUT(self, indices, updates), OP_OUTPUT(self), OP_ATTR(strides, use_locking));

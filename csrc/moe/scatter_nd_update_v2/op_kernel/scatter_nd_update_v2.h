@@ -206,7 +206,7 @@ public:
             int64_t curIdxValue = indiceLocal.GetValue(i);
             if (curIdxValue == lastProcessedIdx_) continue;
             lastProcessedIdx_ = curIdxValue;
-            uint64_t outOffset = curIdxValue * scatterLength_ + tileIdx * scatterTileLength_;
+            uint64_t outOffset = curIdxValue + tileIdx * scatterTileLength_;
             uint64_t updateOffset = (curIdx + inUbNum - 1 - i) * scatterTileAlignLength_;
             DataCopyPad(outputGm_[outOffset], updateLocal[updateOffset], outParams);
         }
