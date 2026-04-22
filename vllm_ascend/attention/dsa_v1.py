@@ -162,8 +162,8 @@ class AscendDSABackend(AttentionBackend):
         return AscendDSAImpl
 
     @staticmethod
-    def get_supported_block_size() -> list[int]:
-        return [32, 64, 128, 1024]
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [2, 32, 128]
 
 
 @dataclass
@@ -294,7 +294,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.model_config = vllm_config.model_config
         self.device = device
         scheduler_config = vllm_config.scheduler_config
-        self.block_size = vllm_config.cache_config.block_size
+        # self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
                            self.block_size - 1) // self.block_size
 
@@ -462,6 +462,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         self.slot_mapping = common_attn_metadata.slot_mapping[:
                                                               num_input_tokens]
+        # slot_mapping = slot_mapping.reshape(-1, 1)
+        # print("BBBBBBBBBBBBBBB", f"{slot_mapping=}")
+        self.slot_mapping = torch.stack([slot_mapping // self.block_size, slot_mapping % self.block_size], axis=-1)
+        # print("AAAAAAAAAAAAAAAA", f"{self.block_size=}, {self.slot_mapping=}")
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -1258,7 +1262,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         # swa exec kv
         torch_npu.npu_scatter_nd_update_(
             swa_kv_cache,
-            swa_metadata.prefill.slot_mapping.unsqueeze(-1), kv)
+            swa_metadata.prefill.slot_mapping, kv)
+        # print("FFFFFFFFFFFFFFF", f"{swa_metadata.prefill.slot_mapping=}, {swa_kv_cache.mean()=}")
+
         compress_cos = compress_common_attn_metadata.prefill.compress_cos[layer_name]
         compress_sin = compress_common_attn_metadata.prefill.compress_sin[layer_name]
         if self.compress_ratio > 1:
@@ -1307,9 +1313,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                 compressed_kv = None
 
             # kv_compress_epilog
-            torch_npu.npu_scatter_nd_update_(
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(
                 compress_kv_cache,
-                compressor_attn_metadata.prefill.slot_mapping.unsqueeze(-1),
+                compressor_attn_metadata.prefill.slot_mapping,
                 compressed_kv)
 
         sliding_window_kv = kv if self.enable_kv_tnd else swa_kv_cache
@@ -1483,9 +1489,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
 
             # swa exec kv
-            torch_npu.npu_scatter_nd_update_(
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(
                 swa_kv_cache,
-                swa_metadata.decode.slot_mapping.unsqueeze(-1), kv)
+                swa_metadata.decode.slot_mapping, kv)
 
             wait_attention_cal_event = torch.npu.current_stream().record_event() \
                 if self.multistream_dsa_preprocess else None
@@ -1520,7 +1526,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 self.compressor_wkv.weight,
                 self.compressor_wgate.weight,
                 state_cache.squeeze(-2),
-                # score_state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
                 compress_sin.view(-1, compress_sin.shape[-1]),
@@ -1536,9 +1541,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                 rotary_mode=2,
                 cache_mode=0)
             # kv_compress_epilog
-            torch_npu.npu_scatter_nd_update_(
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(
                 compress_kv_cache,
-                compressor_attn_metadata.decode.slot_mapping.unsqueeze(-1),
+                compressor_attn_metadata.decode.slot_mapping,
                 compressed_kv)
         if self.compress_ratio <= 1:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
@@ -1685,8 +1690,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             cache_mode=0)
 
         if kv.numel() == 0:
-            pass
-            # kv = None
+            kv = None
         elif self.indexer.compressor.rotate:
             kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
 
@@ -1711,24 +1715,32 @@ class AscendDSAImpl(DSAAttentionImpl):
         if with_prefill:
             assert indexer_kv_scale_metadata.prefill is not None
             if kv is not None:
-                torch_npu.npu_scatter_nd_update_(
+
+                # if torch.distributed.get_rank() == 0:
+                #     print(f"C{self.compress_ratio} Attention decode write kv: {compress_kv_cache=}")
+                #     print(f"C{self.compress_ratio} Attention decode write kv is_contiguous: {compress_kv_cache.is_contiguous()=}")
+                #     print(f"C{self.compress_ratio} Attention decode write kv stride: {compress_kv_cache.stride()=}")
+                #     print(f"C{self.compress_ratio} Attention decode write kv: {compressor_attn_metadata.decode.slot_mapping.unsqueeze(-1)=}")
+                #     print(f"C{self.compress_ratio} Attention decode write kv: {compressed_kv=}")
+
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(
                     indexer_k_cache,
-                    indexer_kv_scale_metadata.prefill.slot_mapping.unsqueeze(-1),
+                    indexer_kv_scale_metadata.prefill.slot_mapping,
                     kv)
-                torch_npu.npu_scatter_nd_update_(
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(
                     indexer_scale_cache,
-                    indexer_kv_scale_metadata.prefill.slot_mapping.unsqueeze(-1),
+                    indexer_kv_scale_metadata.prefill.slot_mapping,
                     kv_scale)
         else:
             assert indexer_kv_scale_metadata.decode is not None
             if kv is not None:
-                torch_npu.npu_scatter_nd_update_(
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(
                     indexer_k_cache,
-                    indexer_kv_scale_metadata.decode.slot_mapping.unsqueeze(-1),
+                    indexer_kv_scale_metadata.decode.slot_mapping,
                     kv)
-                torch_npu.npu_scatter_nd_update_(
+                torch.ops._C_ascend.npu_scatter_nd_update_v2(
                     indexer_scale_cache,
-                    indexer_kv_scale_metadata.decode.slot_mapping.unsqueeze(-1),
+                    indexer_kv_scale_metadata.decode.slot_mapping,
                     kv_scale)
 
         if with_prefill:

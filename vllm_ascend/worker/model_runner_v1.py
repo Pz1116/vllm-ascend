@@ -2206,7 +2206,9 @@ class NPUModelRunner(GPUModelRunner):
                 if for_cudagraph_capture:
                     extra_attn_metadata_args = dict(
                         compress_ratio=compress_ratio,
-                        ratio_to_sas_metadata=dict())
+                        ratio_to_sas_metadata=dict(),
+                        block_size=attn_group.kv_cache_spec.block_size,
+                        )
                 else:
                     # TODO(zxr)
                     extra_attn_metadata_args = dict(

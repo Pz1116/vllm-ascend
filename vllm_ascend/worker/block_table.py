@@ -180,22 +180,22 @@ class BlockTable:
             self.slot_mapping.np[: req_indices.shape[0]] = np.where(mask, slot_mapping, -1)
         else:
             assert self.kernel_sizes is not None
-            if self.block_size == self.kernel_sizes[0]:
-                # IMPORTANT: In hybrid mode, positions are in logical block space,
-                # but we need to map them to the correct logical block table indices
-                logical_block_idx = positions // self.block_size
+            assert self.block_size == self.kernel_sizes[0]
+            # IMPORTANT: In hybrid mode, positions are in logical block space,
+            # but we need to map them to the correct logical block table indices
+            logical_block_idx = positions // self.block_size
 
-                # Account for the expanded logical table
-                # (always needed with unified tensor)
-                # Each physical block is split into multiple logical blocks
-                # The logical table has been expanded to accommodate this
-                block_table_indices = (
-                    req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
-                )
+            # Account for the expanded logical table
+            # (always needed with unified tensor)
+            # Each physical block is split into multiple logical blocks
+            # The logical table has been expanded to accommodate this
+            block_table_indices = (
+                req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
+            )
 
-                block_numbers = self.block_table.np.ravel()[block_table_indices]
-                block_offsets = positions % self.block_size
-                np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            block_offsets = positions % self.block_size
+            np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)

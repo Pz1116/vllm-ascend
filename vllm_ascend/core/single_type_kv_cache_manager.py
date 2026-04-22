@@ -8,7 +8,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager, SlidingWindowManager, FullAttentionManager, spec_manager_map)
-from vllm.v1.kv_cache_interface import KVCacheSpec, AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, AttentionSpec, MLAAttentionSpec
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_spec import (CompressAttentionSpec, # --
@@ -42,7 +42,7 @@ class CompressAttentionManager(FullAttentionManager):
     ) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
-        assert isinstance(self.kv_cache_spec, (CompressAttentionSpec, C4IndexerSpec))
+        # assert isinstance(self.kv_cache_spec, (CompressAttentionSpec, C4IndexerSpec))
 
         num_tokens //= self.compress_ratio
         num_tokens_main_model //= self.compress_ratio
@@ -105,11 +105,11 @@ class CompressAttentionManager(FullAttentionManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
-        assert isinstance(
-            kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
-        ), (
-            "CompressAttentionManager can only be used for compressor attention groups"
-        )
+        # assert isinstance(
+        #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
+        # ), (
+        #     "CompressAttentionManager can only be used for compressor attention groups"
+        # )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids))
         )
@@ -161,6 +161,8 @@ def get_manager_for_kv_cache_spec(kv_cache_spec: KVCacheSpec,
         C4IndexerScoreStateSpec: SlidingWindowManager,
         C4IndexerSpec: CompressAttentionManager
     })
+    # TODO(qcs): remove the unused classes
+    spec_manager_map[MLAAttentionSpec] = CompressAttentionManager
     manager_class = spec_manager_map[type(kv_cache_spec)]
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
