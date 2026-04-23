@@ -401,6 +401,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=[layer.w2_weight_scale],
                 w1_scale_bias=layer.w13_scale_bias if hasattr(layer, "w13_scale_bias") else None,
                 w2_scale_bias=layer.w2_scale_bias if hasattr(layer, "w2_scale_bias") else None,
+                swiglu_limit=layer.swiglu_limit,
             )
         )
 

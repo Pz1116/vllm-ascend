@@ -243,6 +243,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.w2_weight_scale,
                 w1_offset=layer.w13_weight_offset,
                 w2_offset=layer.w2_weight_offset,
+                swiglu_limit=layer.swiglu_limit,
             )
         )
 
