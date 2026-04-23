@@ -8,7 +8,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager, SlidingWindowManager, FullAttentionManager, spec_manager_map)
-from vllm.v1.kv_cache_interface import KVCacheSpec, AttentionSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, AttentionSpec, FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.request import Request
 
 from vllm_ascend.core.kv_cache_spec import (CompressAttentionSpec, # --
