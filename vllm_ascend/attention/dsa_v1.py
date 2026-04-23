@@ -366,6 +366,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seqused_q = torch.tensor([], device=self.device)
         ascend_config = get_ascend_config()
         self.enable_kv_tnd = ascend_config.enable_kv_tnd
+        # Note(qcs): we use two dimension slot_mapping for kvcache with shape [block_nums, block_size, head_num, head_dim]
+        self.slot_mapping = torch.zeros((vllm_config.scheduler_config.max_num_batched_tokens, 2), dtype=torch.int32, device=self.device)
 
     @classmethod
     def get_cudagraph_support(
@@ -464,7 +466,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                               num_input_tokens]
-        self.slot_mapping = torch.stack([slot_mapping // self.block_size, slot_mapping % self.block_size], axis=-1)
+        self.slot_mapping[:num_input_tokens] = torch.stack([slot_mapping // self.block_size, slot_mapping % self.block_size], axis=-1)
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
