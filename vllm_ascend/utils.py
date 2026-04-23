@@ -1416,6 +1416,7 @@ def get_compressed_pos_and_indices(
     req_indices_compressed_list = []
     num_scheduled_tokens_compressed_list = []
     
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
     for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
         # Calculate compressed length of historical & total tokens
         if isinstance(kv_cache_group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
