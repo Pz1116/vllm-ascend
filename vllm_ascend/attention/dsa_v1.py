@@ -1311,7 +1311,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 coff=coff,
                 norm_eps=self.compressor_norm_eps,
                 rotary_mode=2,
-                cache_mode=0)
+                cache_mode=1)
 
             if compressed_kv.numel() == 0:
                 compressed_kv = None
@@ -1543,7 +1543,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 coff=coff,
                 norm_eps=self.compressor_norm_eps,
                 rotary_mode=2,
-                cache_mode=0)
+                cache_mode=1)
             # kv_compress_epilog
             torch.ops._C_ascend.npu_scatter_nd_update_v2(
                 compress_kv_cache,
@@ -1691,7 +1691,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             coff=coff,
             norm_eps=self.compressor_norm_eps,
             rotary_mode=2,
-            cache_mode=0)
+            cache_mode=1)
 
         if kv.numel() == 0:
             kv = None
