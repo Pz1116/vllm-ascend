@@ -82,7 +82,6 @@ class AscendDeepseekV32IndexerCache(DeepseekV32IndexerCache):
 
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        print("mla attention spec: ", f"{self.head_dim=}")
         return AscendMLAAttentionSpec(  # Only has one vector instead of K + V
             block_size=128,
             num_kv_heads=1,
