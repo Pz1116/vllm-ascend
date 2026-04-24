@@ -2050,9 +2050,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
         
-        # check
-        # attn_metadata: PerLayerAttnMetadata = {}
-        attn_metadata: dict[str, Any] = defaultdict(list)
+        attn_metadata: PerLayerAttnMetadata = {}
         
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
@@ -2246,7 +2244,7 @@ class NPUModelRunner(GPUModelRunner):
                 attn_metadata_dict = attn_metadata[ubid]
 
             for layer_name in attn_group.layer_names:
-                attn_metadata_dict[layer_name].append(attn_metadata_i)
+                attn_metadata_dict[layer_name] = attn_metadata_i
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
@@ -2963,8 +2961,9 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        kv_caches: Dict[str, list[torch.Tensor]] = defaultdict(list)
-        layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        kv_caches: Dict[str, torch.Tensor] = {}
+        # TODO(qcs): remove me
+        # layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             # TODO(Angazenn): need to align with current implementation
@@ -3002,10 +3001,7 @@ class NPUModelRunner(GPUModelRunner):
                                            current_kv_cache_spec.page_size_bytes,
                                            )
 
-                    if len(kv_cache) == 1:
-                        # TODO(zyj): this is not work, fix me.
-                        kv_cache = kv_cache[0]
-                    kv_caches[layer_name].append(kv_cache)
+                    kv_caches[layer_name] = kv_cache
                 # encounter OOM issue
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
                     if self.use_sparse:

@@ -195,7 +195,6 @@ def dsa_forward(
         output.fill_(0)
         return
 
-    # 
     compress_kv_cache = None
     swa_kv_cache = self.swa_cache_layer.kv_cache
     state_cache = None
@@ -209,16 +208,17 @@ def dsa_forward(
     if self.compress_ratio == 4:
         # TODO(qcs): refactor me
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        indexer_k_cache, indexer_scale_cache = self.indexer.k_cache.kv_cache[0][0][0], self.indexer.k_cache.kv_cache[0][0][1]
+        indexer_k_cache, indexer_scale_cache = self.indexer.k_cache.kv_cache[0][0], self.indexer.k_cache.kv_cache[0][1]
 
-    kv_cache = (
+    kv_cache = tuple([
+        unfold_kvcache(cache) for cache in (
         compress_kv_cache,
         swa_kv_cache,
         state_cache,
         indexer_state_cache,
         indexer_k_cache,
         indexer_scale_cache,
-    )
+    )])
 
     self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states,
                                kv_cache, attn_metadata, need_gather_q_kv,
@@ -244,5 +244,10 @@ direct_register_custom_op(
 )
 
 def filter_metadata(metadata, prefix):
-    # filter using prefix and remove prefix.
-    return [v[0] for k, v in metadata.items() if k.startswith(prefix)]
+    # filter using prefix
+    return [v for k, v in metadata.items() if k.startswith(prefix)]
+
+def unfold_kvcache(kvcache):
+    while isinstance(kvcache, list) and len(kvcache) == 1:
+        kvcache = kvcache[0]
+    return kvcache

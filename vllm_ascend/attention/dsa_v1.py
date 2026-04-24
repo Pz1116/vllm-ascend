@@ -1202,35 +1202,16 @@ class AscendDSAImpl(DSAAttentionImpl):
             # (indexer_kv_scale_metadata, _, _, _, indexer_kv_state_metadata)
             # (indexer_kv_scale_metadata, compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata, indexer_kv_state_metadata) 
             compress_common_attn_metadata = compressor_attn_metadata
-            while isinstance(compress_kv_cache, list):
-                # FIXME(zyj): why the kvcache is a 3-dim list?
-                compress_kv_cache = compress_kv_cache[0]
-            while isinstance(state_cache, list):
-                # FIXME(zyj): why the kvcache is a 3-dim list?
-                state_cache = state_cache[0]
-
         elif self.compress_ratio == 128:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             # ['attn', 'swa_cache', 'compressor.state_cache']
             (compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
-
-            while isinstance(compress_kv_cache, list):
-                # FIXME(zyj): why the kvcache is a 3-dim list?
-                compress_kv_cache = compress_kv_cache[0]
-            while isinstance(state_cache, list):
-                # FIXME(zyj): why the kvcache is a 3-dim list?
-                state_cache = state_cache[0]
-
         else:
             (_, swa_kv_cache, _, _, _, _,) = kv_cache
             # ['swa_cache']
             (swa_metadata,) = attn_metadata
             compress_common_attn_metadata = swa_metadata
-
-        while isinstance(swa_kv_cache, list):
-            # FIXME(zyj): why the kvcache is a 3-dim list?
-            swa_kv_cache = swa_kv_cache[0]
 
         assert compress_common_attn_metadata.prefill is not None
         cos = compress_common_attn_metadata.prefill.cos[layer_name]
@@ -1404,29 +1385,10 @@ class AscendDSAImpl(DSAAttentionImpl):
             # ['indexer.k_cache', 'attn', 'swa_cache', 'compressor.state_cache', 'indexer.compressor.state_cache']
             (_, compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata, _) = attn_metadata
             compress_common_attn_metadata = compressor_attn_metadata
-            # a=['.indexer.k_cache', '.attn', '.swa_cache', '.compressor.state_cache', 
-            # '.compressor.indexer_state_cache', 
-            # '.indexer.compressor.state_cache', '.indexer.compressor.indexer_state_cache']
-
-            while isinstance(compress_kv_cache, list):
-                # FIXME(zyj): why the kvcache is a 3-dim list?
-                compress_kv_cache = compress_kv_cache[0]
-            while isinstance(state_cache, list):
-                # FIXME(zyj): why the kvcache is a 3-dim list?
-                state_cache = state_cache[0]
-
         elif self.compress_ratio == 128:
             (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = kv_cache
             # ['attn', 'swa_cache', 'compressor.state_cache']
             (compressor_attn_metadata, swa_metadata, compressor_kv_state_metadata) = attn_metadata
-
-            while isinstance(compress_kv_cache, list):
-                # FIXME(zyj): why the kvcache is a 3-dim list?
-                compress_kv_cache = compress_kv_cache[0]
-            while isinstance(state_cache, list):
-                # FIXME(zyj): why the kvcache is a 3-dim list?
-                state_cache = state_cache[0]
-
             compress_common_attn_metadata = compressor_attn_metadata
         else:
             (_, swa_kv_cache, _, _, _, _) = kv_cache
@@ -1437,9 +1399,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = compress_common_attn_metadata.decode.sin[layer_name]
         actual_seq_lengths_query = compress_common_attn_metadata.decode.query_start_loc
         actual_seq_lengths_key = compress_common_attn_metadata.decode.seq_lens
-        while isinstance(swa_kv_cache, list):
-            # FIXME(zyj): why the kvcache is a 3-dim list?
-            swa_kv_cache = swa_kv_cache[0]
         wait_hidden_state_cal_event = torch.npu.current_stream().record_event() \
             if self.multistream_dsa_preprocess else None
 
@@ -1623,17 +1582,6 @@ class AscendDSAImpl(DSAAttentionImpl):
     ):
         (_, _, _, indexer_state_cache, indexer_k_cache, indexer_scale_cache) = kv_cache
         (indexer_kv_scale_metadata, _, _, _, indexer_kv_state_metadata) = attn_metadata
-
-        while isinstance(indexer_state_cache, list):
-            # FIXME(zyj): why the kvcache is a 3-dim list?
-            indexer_state_cache = indexer_state_cache[0]
-        while isinstance(indexer_k_cache, list):
-            # FIXME(zyj): why the kvcache is a 3-dim list?
-            indexer_k_cache = indexer_k_cache[0]
-        while isinstance(indexer_scale_cache, list):
-            # FIXME(zyj): why the kvcache is a 3-dim list?
-            indexer_scale_cache = indexer_scale_cache[0]
-
 
         if (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
             isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod) and \
