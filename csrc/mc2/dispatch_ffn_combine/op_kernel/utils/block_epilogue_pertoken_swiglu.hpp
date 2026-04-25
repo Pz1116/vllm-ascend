@@ -317,6 +317,7 @@ private:
     AscendC::LocalTensor<float> ubPerTokenScaleOutput;
     AscendC::LocalTensor<uint8_t> sharedTmpBuffer;
 
+
     CopyGmToUbC copyGmToUbC;
     CopyUbToGmD copyUbToGmD;
     CopyUbToGmDequantScale copyUbToGmDequantScale;

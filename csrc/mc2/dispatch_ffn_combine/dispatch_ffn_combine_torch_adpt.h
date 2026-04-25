@@ -24,8 +24,6 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
     const at::Tensor& expert_idx,
     const at::TensorList& scale1,
     const at::TensorList& scale2,
-    const at::TensorList& bias1,
-    const at::TensorList& bias2,
     const at::Tensor& probs,
     c10::string_view group,
     int64_t max_output_size,
@@ -35,7 +33,6 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
     bool is_int8 = weight1[0].dtype() == at::kChar;
-    bool is_int4 = weight1[0].dtype() == at::kInt;
     if (is_int8) {
         EXEC_NPU_CMD(aclnnDispatchFFNCombine,
                  x,
@@ -48,21 +45,6 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  group_ep_ptr,
                  max_output_size,
                  swiglu_limit,
-                 out,
-                 expert_token_nums);
-    } else if (is_int4){
-        EXEC_NPU_CMD(aclnnDispatchFFNCombineW4A8,
-                 x,
-                 weight1,
-                 weight2,
-                 expert_idx,
-                 scale1,
-                 scale2,
-                 bias1,
-                 bias2,
-                 probs,
-                 group_ep_ptr,
-                 max_output_size,
                  out,
                  expert_token_nums);
     } else {
