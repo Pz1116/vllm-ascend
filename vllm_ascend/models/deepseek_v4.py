@@ -672,10 +672,10 @@ class DeepseekV4Attention(nn.Module):
         self.compress_ratio = config.compress_ratios[layer_idx]
 
         if self.compress_ratio > 1:
-            config.rope_parameters['rope_theta'] = 160000
+            config.rope_parameters['rope_theta'] = config.compress_rope_theta
             rope_groups = ['default', f'c{self.compress_ratio}']
         else:
-            config.rope_parameters['rope_theta'] = 10000
+            config.rope_parameters['rope_theta'] = config.rope_theta
             rope_groups = ['default']
         self.rotary_emb = ComplexExpRotaryEmbedding(
             vllm_config=vllm_config,
