@@ -2823,9 +2823,14 @@ class NPUModelRunner(GPUModelRunner):
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors.keys(
                 ):
-                    tensor = torch.zeros(kv_cache_tensor.size,
-                                            dtype=torch.int8,
-                                            device=self.device)
+                    if self.vllm_config.kv_transfer_config is None:
+                        tensor = torch.zeros(kv_cache_tensor.size,
+                                                dtype=torch.int8,
+                                                device=self.device)
+                    else:
+                        cache_size_aligned = kv_cache_tensor.size + alignment
+                        tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
                         kv_cache_raw_tensors[layer_name_inner] = tensor
@@ -2930,7 +2935,7 @@ class NPUModelRunner(GPUModelRunner):
         page_size_bytes: int,
     ):
         reshaped_kv_tensors = []
-        storage_offset_bytes = 0
+        storage_offset_bytes = raw_tensor.storage_offset()
         for shape, dtype in zip(kv_cache_shape_list, kv_cache_dtype_list):
             dtype_size = get_dtype_size(dtype)
             num_element_per_page = (
@@ -2969,7 +2974,6 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: Dict[str, torch.Tensor] = {}
         # TODO(qcs): remove me
-        # layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             # TODO(Angazenn): need to align with current implementation

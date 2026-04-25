@@ -1466,7 +1466,6 @@ class MooncakeConnectorWorker:
                     layer_group_idx[layer_name] = i
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 share_tensor_addr = []
-                share_tensor_len = []
                 share_tensor_stride = []
                 cur_tensor_group_idx = []
                 for layer_name in kv_cache_tensor.shared_by:
@@ -1479,16 +1478,12 @@ class MooncakeConnectorWorker:
                         if tensor_addr in share_tensor_addr or tensor_addr in self.kv_caches_base_addr:
                             continue
                         share_tensor_addr.append(tensor_addr)
-                        tensor_total_size = single_tensor.numel() * single_tensor.element_size()
-                        assert tensor_total_size % self.num_blocks == 0, "Tensor size cannot divide by num_blocks. "
-                        tensor_block_len = tensor_total_size // self.num_blocks
-                        share_tensor_len.append(tensor_block_len)
                         share_tensor_stride.append(single_tensor.stride(0) * single_tensor.element_size())
                 cur_tensor_group_idx = sorted(list(set(cur_tensor_group_idx)))
-                self.kv_caches_base_addr.extend(share_tensor_addr)
-                self.addr_group_idx.extend([cur_tensor_group_idx for _ in range(len(share_tensor_addr))])
-                self.block_stride_per_addr.extend(share_tensor_stride)
-                self.block_len_per_addr.extend(share_tensor_len)
+                self.kv_caches_base_addr.append(min(share_tensor_addr))
+                self.addr_group_idx.append(cur_tensor_group_idx)
+                self.block_stride_per_addr.append(share_tensor_stride[0])
+                self.block_len_per_addr.append(share_tensor_stride[0])
                 ptrs.append(min(share_tensor_addr))
                 lengths.append(kv_cache_tensor.size)
         else:
