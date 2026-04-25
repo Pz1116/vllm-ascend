@@ -436,7 +436,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                 )
                 per_layer_attn_metadata = dict()
                 for layer_name in self.attn_layer_names:
-                    per_layer_attn_metadata[layer_name] = [attn_metadata_eagle]
+                    per_layer_attn_metadata[layer_name] = attn_metadata_eagle
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         model_positions = self._get_positions(num_tokens)
@@ -612,11 +612,11 @@ class SpecDecodeBaseProposer(EagleProposer):
         per_layer_attn_metadata = dict()
         # The first step of speculative.
         for layer_name in self.attn_layer_names:
-            per_layer_attn_metadata[layer_name] = [attn_metadata]
+            per_layer_attn_metadata[layer_name] = attn_metadata
         multi_steps_attn_metadata = [per_layer_attn_metadata]
 
         # Copy the old attn_metadata and update
-        attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]][0]
+        attn_metadata_i = per_layer_attn_metadata[self.attn_layer_names[0]]
 
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
@@ -688,7 +688,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                                 attn_group=attn_group,
                             )
                             for layer_name in self.attn_layer_names:
-                                per_layer_attn_metadata[layer_name] = [attn_metadata]
+                                per_layer_attn_metadata[layer_name] = attn_metadata
                         multi_steps_attn_metadata.append(per_layer_attn_metadata)
         else:
             # Copy the old attn_metadata and update
@@ -707,7 +707,7 @@ class SpecDecodeBaseProposer(EagleProposer):
                             attn_group=attn_group,
                         )
                         for layer_name in self.attn_layer_names:
-                            per_layer_attn_metadata[layer_name] = [attn_metadata]
+                            per_layer_attn_metadata[layer_name] = attn_metadata
                     multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
