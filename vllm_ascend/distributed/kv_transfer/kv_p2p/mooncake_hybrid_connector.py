@@ -50,6 +50,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
 
@@ -1046,18 +1047,35 @@ class MooncakeConnectorScheduler:
         # hybrid model config
         self.use_hybrid = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and any(
             not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups
-        )
+        ) and len(kv_cache_config.kv_cache_groups) > 1
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
-        self.need_truncate = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.kv_cache_groups
-        ) or self.use_compress
-        sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
-            else (0, self.block_size)
-            for g in kv_cache_config.kv_cache_groups
-        ]
+
+        self.kv_cache_specs = []
+        self.need_truncate = self.use_compress
+        sw_sizes_tokens: list[tuple[int, int]] = []
+        for g in kv_cache_config.kv_cache_groups:
+            if isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs):
+                group_spec_set = []
+                for layer_name in g.layer_names:
+                    layer_spec = g.kv_cache_spec.kv_cache_specs[layer_name]
+                    if layer_spec not in group_spec_set:
+                        group_spec_set.append(layer_spec)
+                self.kv_cache_specs.append(group_spec_set)
+                if isinstance(group_spec_set[0], SlidingWindowSpec):
+                    sw_sizes_tokens.append((group_spec_set[0].sliding_window, group_spec_set[0].block_size))
+                else:
+                    sw_sizes_tokens.append((0, layer_spec.block_size))
+                if isinstance(layer_spec, MambaSpec):
+                    self.need_truncate = True
+            else:
+                if isinstance(g.kv_cache_spec, SlidingWindowSpec):
+                    sw_sizes_tokens.append((g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size))
+                else:
+                    sw_sizes_tokens.append((0, g.kv_cache_spec.block_size))
+                if isinstance(g.kv_cache_spec, MambaSpec):
+                    self.need_truncate = True
+                self.kv_cache_specs.append([g.kv_cache_spec])
+
         self.num_swa_blocks = [
             cdiv(n_tokens, block_size) + 1 if n_tokens else 0
             for n_tokens, block_size in sw_sizes_tokens
@@ -1307,7 +1325,7 @@ class MooncakeConnectorWorker:
         self.kv_cache_config = kv_cache_config
         self.use_hybrid = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and any(
             not isinstance(g.kv_cache_spec, FullAttentionSpec) for g in kv_cache_config.kv_cache_groups
-        )
+        ) and len(kv_cache_config.kv_cache_groups) > 1
         self.hma_group_size = len(kv_cache_config.kv_cache_groups)
 
         # Mamba metadata
@@ -1442,18 +1460,20 @@ class MooncakeConnectorWorker:
                     ptrs.append(min(share_tensor_addr))
                     lengths.append(kv_cache_tensor.size)
         elif self.use_compress:
-            layer_group_idx = defaultdict(list)
+            layer_group_idx = dict[str, int]()
             for i, group in enumerate(self.kv_cache_config.kv_cache_groups):
                 for layer_name in group.layer_names:
-                    layer_group_idx[layer_name].append(i)
+                    layer_group_idx[layer_name] = i
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 share_tensor_addr = []
                 share_tensor_len = []
                 share_tensor_stride = []
                 cur_tensor_group_idx = []
                 for layer_name in kv_cache_tensor.shared_by:
-                    cur_tensor_group_idx.extend(layer_group_idx[layer_name])
+                    cur_tensor_group_idx.append(layer_group_idx[layer_name])
                     kv_cache_tuple = kv_caches[layer_name]
+                    if not isinstance(kv_cache_tuple, (tuple, list)):
+                        kv_cache_tuple = (kv_cache_tuple)
                     for single_tensor in kv_cache_tuple:
                         tensor_addr = single_tensor.data_ptr()
                         if tensor_addr in share_tensor_addr or tensor_addr in self.kv_caches_base_addr:
