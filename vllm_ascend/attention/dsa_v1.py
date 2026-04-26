@@ -330,12 +330,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         layer_idx = extract_layer_index(layer_names[0])
-        if layer_idx in [0, 1]:
-            self.compressor_ratio = 0
-        elif layer_idx % 2 == 0:
-            self.compressor_ratio = 4
-        else:
-            self.compressor_ratio = 128
+        self.compressor_ratio = getattr(self.vllm_config.model_config.hf_config,  "compress_ratios", 0)[layer_idx]
 
         if AscendDSAMetadataBuilder.hadamard is None:
             hf_config = self.model_config.hf_config
