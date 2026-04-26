@@ -59,6 +59,9 @@ ge::graphStatus HcPreSinkhornTiling::GetPlatformInfo()
         ubSize_ = ubSizePlatForm;
         socVersion_ = ascendcPlatform.GetSocVersion();
     }
+    OPS_LOG_I(context_->GetNodeName(),
+              "HcPreSinkhorn platform info: coreNum=%lu, ubSize=%lu, socVersion=%d",
+              coreNum_, ubSize_, static_cast<int32_t>(socVersion_));
     return ge::GRAPH_SUCCESS;
 }
 
@@ -136,6 +139,16 @@ ge::graphStatus HcPreSinkhornTiling::GetShapeAttrsInfoInner()
                              "bs, d and hc_mult should be positive, got bs=%ld, d=%ld, hc_mult=%ld",
                              bs_, d_, hcMult_),
                     return ge::GRAPH_FAILED);
+    OPS_LOG_I(context_->GetNodeName(),
+              "HcPreSinkhorn shape attrs: mixesDim=%lu, xDim=%lu, bs=%ld, hcMix=%ld, "
+              "hcMult=%ld, xHc=%ld, d=%ld, iterTimes=%ld, eps=%f",
+              mixerDimNum, xDimNum, bs_, hcMix_, hcMult_, xHc, d_, iterTimes_, eps_);
+    if (hcMult_ > 64) {
+        OPS_LOG_I(context_->GetNodeName(),
+                  "HcPreSinkhorn potential kernel limit: hcMult=%ld is greater than 64; "
+                  "SoftmaxFP32Perf documents support only for small R-axis.",
+                  hcMult_);
+    }
 
     return ge::GRAPH_SUCCESS;
 }
@@ -244,6 +257,23 @@ ge::graphStatus HcPreSinkhornTiling::CalcRegbaseOpTiling()
     tilingData_.set_tailDFactor(tailDFactor_);
     tilingData_.set_iterTimes(iterTimes_);
     tilingData_.set_eps(eps_);
+    int64_t finalMix0Size = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalMix1Size = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalMix2Size = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalRsqrtSize = RoundUp(rowFactor_, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalXSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
+    int64_t finalYSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
+    int64_t finalPostSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalCombFragSize = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalUbSize = finalMix0Size + finalMix1Size + finalMix2Size + finalRsqrtSize + finalXSize +
+                          finalYSize + finalPostSize + finalCombFragSize + base0Size + base1Size + base2Size;
+    OPS_LOG_I(context_->GetNodeName(),
+              "HcPreSinkhorn regbase tiling: bs=%ld, hcMult=%ld, hcMultAlign=%ld, d=%ld, "
+              "ubSize=%lu, finalUbSize=%ld, usedCoreNums=%lu, rowOfFormerBlock=%ld, rowOfTailBlock=%ld, "
+              "rowFactor=%ld, dLoop=%ld, dFactor=%ld, tailDFactor=%ld, rowLoopFormer=%ld, rowLoopTail=%ld",
+              bs_, hcMult_, hcMultAlign_, d_, ubSize_, finalUbSize, usedCoreNums_, rowOfFormerBlock_,
+              rowOfTailBlock_, rowFactor_, dLoop_, dFactor_, tailDFactor_, rowLoopOfFormerBlock_,
+              rowLoopOfTailBlock_);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -366,6 +396,30 @@ ge::graphStatus HcPreSinkhornTiling::CalcMembaseOpTiling()
     tilingData_.set_tailDFactor(tailDFactor_);
     tilingData_.set_iterTimes(iterTimes_);
     tilingData_.set_eps(eps_);
+    int64_t finalMix0Size = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalMix1Size = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalMix2Size = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalRsqrtSize = RoundUp(rowFactor_, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalXSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
+    int64_t finalYSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
+    int64_t finalPostSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalCombFragSize = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+    int64_t finalXCastSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
+    int64_t finalYCastSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
+    int64_t finalRowBrcb0Size = RoundUp(rowFactor_, 8) * BLOCK_SIZE;
+    int64_t finalHcBrcb1Size = RoundUp(rowFactor_ * hcMultAlign_, 8) * BLOCK_SIZE;
+    int64_t finalReduceBufSize = rowFactor_ * hcMultAlign_ * sizeof(float);
+    int64_t finalUbSize = finalMix0Size + finalMix1Size + finalMix2Size + finalRsqrtSize + finalXSize +
+                          finalYSize + finalPostSize + finalCombFragSize + base0Size + base1Size + base2Size +
+                          finalXCastSize + finalYCastSize + finalRowBrcb0Size + finalHcBrcb1Size +
+                          finalReduceBufSize;
+    OPS_LOG_I(context_->GetNodeName(),
+              "HcPreSinkhorn membase tiling: bs=%ld, hcMult=%ld, hcMultAlign=%ld, d=%ld, "
+              "ubSize=%lu, finalUbSize=%ld, usedCoreNums=%lu, rowOfFormerBlock=%ld, rowOfTailBlock=%ld, "
+              "rowFactor=%ld, dLoop=%ld, dFactor=%ld, tailDFactor=%ld, rowLoopFormer=%ld, rowLoopTail=%ld",
+              bs_, hcMult_, hcMultAlign_, d_, ubSize_, finalUbSize, usedCoreNums_, rowOfFormerBlock_,
+              rowOfTailBlock_, rowFactor_, dLoop_, dFactor_, tailDFactor_, rowLoopOfFormerBlock_,
+              rowLoopOfTailBlock_);
     return ge::GRAPH_SUCCESS;
 }
 
