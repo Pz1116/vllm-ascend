@@ -109,11 +109,33 @@ ge::graphStatus HcPreSinkhornTiling::GetShapeAttrsInfoInner()
                     return ge::GRAPH_FAILED);
 
     auto shapeX = context_->GetInputShape(4);
+    size_t xDimNum = shapeX->GetStorageShape().GetDimNum();
+    OPS_ERR_IF((mixerDimNum == 2 && xDimNum != 3) || (mixerDimNum == 3 && xDimNum != 4),
+                    OPS_LOG_E(context_->GetNodeName(),
+                             "x dim should match mixes dim, but x dim is %lu and mixes dim is %lu",
+                             xDimNum, mixerDimNum),
+                    return ge::GRAPH_FAILED);
     d_ = (mixerDimNum == 2 ? shapeX->GetStorageShape().GetDim(2) : shapeX->GetStorageShape().GetDim(3));
 
     OPS_ERR_IF(GetAttr() != ge::GRAPH_SUCCESS,
                   OPS_LOG_E(context_->GetNodeName(), "get attr failed."),
                   return ge::GRAPH_FAILED);
+    OPS_ERR_IF(hcMix_ != (2 + hcMult_) * hcMult_,
+                    OPS_LOG_E(context_->GetNodeName(),
+                             "mixes last dim should be (2 + hc_mult) * hc_mult, but is %ld, hc_mult is %ld",
+                             hcMix_, hcMult_),
+                    return ge::GRAPH_FAILED);
+    int64_t xHc = (mixerDimNum == 2 ? shapeX->GetStorageShape().GetDim(1) : shapeX->GetStorageShape().GetDim(2));
+    OPS_ERR_IF(xHc != hcMult_,
+                    OPS_LOG_E(context_->GetNodeName(),
+                             "x hc dim should equal hc_mult, but is %ld, hc_mult is %ld",
+                             xHc, hcMult_),
+                    return ge::GRAPH_FAILED);
+    OPS_ERR_IF(d_ <= 0 || bs_ <= 0 || hcMult_ <= 0,
+                    OPS_LOG_E(context_->GetNodeName(),
+                             "bs, d and hc_mult should be positive, got bs=%ld, d=%ld, hc_mult=%ld",
+                             bs_, d_, hcMult_),
+                    return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -153,6 +175,13 @@ ge::graphStatus HcPreSinkhornTiling::CalcRegbaseOpTiling()
         int64_t usedUbSize = mix0Size + mix1Size + mix2Size + rsqrtSize + postSize + combFragSize + 
                              base0Size + base1Size + base2Size;
         int64_t ubRemain = ubSize_ - usedUbSize;
+        int64_t minTargetSize = rowOnceLoop * hcMult_ * RoundUp(1, 16) * 2 * DOUBLE_BUFFER * 2;
+        OPS_ERR_IF(ubRemain < minTargetSize,
+                   OPS_LOG_E(context_->GetNodeName(),
+                             "HcPreSinkhorn tiling failed: no available UB for minimum d split, "
+                             "ubSize=%lu, usedUbSize=%ld, ubRemain=%ld, minTargetSize=%ld, hcMult=%ld, d=%ld, bs=%ld",
+                             ubSize_, usedUbSize, ubRemain, minTargetSize, hcMult_, d_, bs_),
+                   return ge::GRAPH_FAILED);
         dFactor_ = d_;
         int64_t base = 2;
         while (1) {
@@ -257,6 +286,17 @@ ge::graphStatus HcPreSinkhornTiling::CalcMembaseOpTiling()
         int64_t usedUbSize = mix0Size + mix1Size + mix2Size + rsqrtSize + postSize + combFragSize + 
                              base0Size + base1Size + base2Size + rowBrcb0Size + hcBrcb1Size + reduceBufSize;
         int64_t ubRemain = ubSize_ - usedUbSize;
+        int64_t minXSize = rowOnceLoop * hcMult_ * RoundUp(1, 16) * 2 * DOUBLE_BUFFER;
+        int64_t minYSize = rowOnceLoop * hcMult_ * RoundUp(1, 16) * 2 * DOUBLE_BUFFER;
+        int64_t minXCastSize = rowOnceLoop * hcMult_ * RoundUp(1, 8) * sizeof(float);
+        int64_t minYCastSize = rowOnceLoop * hcMult_ * RoundUp(1, 8) * sizeof(float);
+        int64_t minTargetSize = minXSize + minYSize + minXCastSize + minYCastSize;
+        OPS_ERR_IF(ubRemain < minTargetSize,
+                   OPS_LOG_E(context_->GetNodeName(),
+                             "HcPreSinkhorn tiling failed: no available UB for minimum d split, "
+                             "ubSize=%lu, usedUbSize=%ld, ubRemain=%ld, minTargetSize=%ld, hcMult=%ld, d=%ld, bs=%ld",
+                             ubSize_, usedUbSize, ubRemain, minTargetSize, hcMult_, d_, bs_),
+                   return ge::GRAPH_FAILED);
         dFactor_ = d_;
         int64_t base = 2;
         while (1) {

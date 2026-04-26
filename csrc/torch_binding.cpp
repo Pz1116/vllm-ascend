@@ -1229,8 +1229,6 @@ at::Tensor construct_hc_post_output_tensor(const at::Tensor& residual)
 
 // step1，工具函数，检查输入shape
 void check_hc_post_shape_and_dtype(const at::Tensor& x, const at::Tensor& residual, const at::Tensor& post, const at::Tensor& com) {
-    constexpr int64_t HC_LIMIT = 4;
-    constexpr int64_t D_LIMIT = 4096;
     // check x shape: [b, s, d]
     TORCH_CHECK(x.dim() == 3, "Input tensor x's dim num should be 3, actual ", x.dim(), ".");
     for (size_t i = 0; i < 3; i++) {
@@ -1239,13 +1237,12 @@ void check_hc_post_shape_and_dtype(const at::Tensor& x, const at::Tensor& residu
     auto batch = x.size(0);
     auto sequence = x.size(1);
     auto d = x.size(2);
-    TORCH_CHECK(d == D_LIMIT, "The d of x only support ", D_LIMIT, ", actual ", d, ".");
     // check residual: [b, s, hc, d]
     TORCH_CHECK(residual.dim() == 4, "Input tensor residual's dim num should be 4, actual ", residual.dim(), ".");
     auto hc = residual.size(2);
+    TORCH_CHECK(hc > 0, "The hc of residual should be positive, actual ", hc, ".");
     TORCH_CHECK(residual.size(0) == batch, "The residual.shape[0] should be batch, actual residual.shape[0] is ", residual.size(0), ", batch is ", batch, ".");
     TORCH_CHECK(residual.size(1) == sequence, "The residual.shape[1] should be sequence, actual residual.shape[1] is ", residual.size(1), ", sequence is ", sequence, ".");
-    TORCH_CHECK(hc == HC_LIMIT, "The hc of residual only support ", HC_LIMIT, ", actual ", hc, ".");
     TORCH_CHECK(residual.size(3) == d, "The residual.shape[3] should be d, actual residual.shape[3] is ", residual.size(3), ", d is ", d, ".");
     // check post [b, s, hc]
     TORCH_CHECK(post.dim() == 3, "Input tensor post's dim num should be 3, actual ", post.dim(), ".");

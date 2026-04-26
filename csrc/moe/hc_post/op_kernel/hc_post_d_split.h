@@ -160,8 +160,8 @@ __aicore__ inline void HcPostKernelDSplit<T1, T2>::Init(GM_ADDR x, GM_ADDR resid
         pipe_->InitBuffer(postCastBuf_, hcParam_ * sizeof(float));
         pipe_->InitBuffer(combCastBuf_, hcParam_ * hcParam_ * sizeof(float));
     }
-    pipe_->InitBuffer(postBrcbBuf_, 64 * sizeof(float));
-    pipe_->InitBuffer(combBrcbBuf_, 64 * sizeof(float));
+    pipe_->InitBuffer(postBrcbBuf_, RoundUp<float>(hcParam_) * BLOCK_SIZE);
+    pipe_->InitBuffer(combBrcbBuf_, RoundUp<float>(hcParam_) * BLOCK_SIZE);
     pipe_->InitBuffer(tempSumBuf_, hcParam_ * dOnceDealing_ * sizeof(float));
 }
 
@@ -374,7 +374,7 @@ __aicore__ inline void DoAdd(LocalTensor<T> src0Local, LocalTensor<T> src1Local,
             instrParams.dstRepStride = dstRepStridePerLine;
             instrParams.src0RepStride = dstRepStridePerLine;
             instrParams.src1RepStride = dstRepStridePerLine;
-            Mul(dstLocal[numRepeatPerLine*elemInOneRepeat], src0Local[numRepeatPerLine*elemInOneRepeat], src1Local[numRepeatPerLine*elemInOneRepeat], numRemainPerLine, curRowNum, instrParams);
+            Add(dstLocal[numRepeatPerLine*elemInOneRepeat], src0Local[numRepeatPerLine*elemInOneRepeat], src1Local[numRepeatPerLine*elemInOneRepeat], numRemainPerLine, curRowNum, instrParams);
         }
     }
     PipeBarrier<PIPE_V>();
@@ -420,8 +420,8 @@ __aicore__ inline void HcPostKernelDSplit<T1, T2>::DoCompute(LocalTensor<float> 
     }
     if constexpr (sizeof(T1) == 2) {
         LocalTensor<T1> outSumBuf = outQue_.AllocTensor<T1>();
-        uint32_t outAlign = RoundUp<float>(dealNum);
-        uint32_t inputAlign = RoundUp<T1>(dealNum);
+        uint32_t inputAlign = RoundUp<float>(dealNum);
+        uint32_t outAlign = RoundUp<T1>(dealNum);
         for (int32_t i = 0; i < hcParam_; i++) {
             Cast(outSumBuf[i*outAlign], outBuf[i*inputAlign], RoundMode::CAST_RINT, dealNum);
         }

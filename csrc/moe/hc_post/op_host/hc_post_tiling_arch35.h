@@ -131,6 +131,26 @@ ge::graphStatus HcPostTilingRegbase::GetInputShapeInfoRegbase()
     sParam_ = xShape.GetDim(DIM_INDEX_1);
     dParam_ = xShape.GetDim(DIM_INDEX_2);
     hcParam_ = residualShape.GetDim(DIM_INDEX_2);
+    OPS_ERR_IF((bParam_ <= 0 || sParam_ <= 0 || dParam_ <= 0 || hcParam_ <= 0),
+        OPS_LOG_E(context_->GetNodeName(), "b, s, d and hc should be positive, got b=%ld, s=%ld, d=%ld, hc=%ld.",
+                  bParam_, sParam_, dParam_, hcParam_),
+        return ge::GRAPH_FAILED);
+    OPS_ERR_IF((residualShape.GetDim(DIM_INDEX_0) != bParam_ ||
+                residualShape.GetDim(DIM_INDEX_1) != sParam_ ||
+                residualShape.GetDim(DIM_INDEX_3) != dParam_),
+        OPS_LOG_E(context_->GetNodeName(), "residual shape should be [b, s, hc, d]."),
+        return ge::GRAPH_FAILED);
+    OPS_ERR_IF((postShape.GetDim(DIM_INDEX_0) != bParam_ ||
+                postShape.GetDim(DIM_INDEX_1) != sParam_ ||
+                postShape.GetDim(DIM_INDEX_2) != hcParam_),
+        OPS_LOG_E(context_->GetNodeName(), "post shape should be [b, s, hc]."),
+        return ge::GRAPH_FAILED);
+    OPS_ERR_IF((combShape.GetDim(DIM_INDEX_0) != bParam_ ||
+                combShape.GetDim(DIM_INDEX_1) != sParam_ ||
+                combShape.GetDim(DIM_INDEX_2) != hcParam_ ||
+                combShape.GetDim(DIM_INDEX_3) != hcParam_),
+        OPS_LOG_E(context_->GetNodeName(), "comb shape should be [b, s, hc, hc]."),
+        return ge::GRAPH_FAILED);
     tilingRegbaseData_.set_bParam(bParam_);
     tilingRegbaseData_.set_sParam(sParam_);
     tilingRegbaseData_.set_dParam(dParam_);
