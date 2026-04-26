@@ -683,7 +683,6 @@ class DeepseekV4Attention(nn.Module):
             head_size=self.rope_head_dim,
             rotary_dim=self.rope_head_dim,
             max_position_embeddings=max_position_embeddings,
-            original_max_position_embeddings=config.rope_parameters['original_max_position_embeddings'] if self.compress_ratio>0 else 0,
             is_neox_style=False,
             scaling_factor=config.rope_parameters['factor'],
             base=config.rope_parameters['rope_theta'],
@@ -778,8 +777,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = config.rope_parameters["original_max_position_embeddings"]
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
