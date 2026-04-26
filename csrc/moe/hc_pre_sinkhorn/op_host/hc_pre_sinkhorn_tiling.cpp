@@ -1,10 +1,10 @@
 /**
- * This program is free software, you can redistribute it and/or modify it.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
@@ -59,9 +59,6 @@ ge::graphStatus HcPreSinkhornTiling::GetPlatformInfo()
         ubSize_ = ubSizePlatForm;
         socVersion_ = ascendcPlatform.GetSocVersion();
     }
-    OPS_LOG_I(context_->GetNodeName(),
-              "HcPreSinkhorn platform info: coreNum=%lu, ubSize=%lu, socVersion=%d",
-              coreNum_, ubSize_, static_cast<int32_t>(socVersion_));
     return ge::GRAPH_SUCCESS;
 }
 
@@ -112,43 +109,11 @@ ge::graphStatus HcPreSinkhornTiling::GetShapeAttrsInfoInner()
                     return ge::GRAPH_FAILED);
 
     auto shapeX = context_->GetInputShape(4);
-    size_t xDimNum = shapeX->GetStorageShape().GetDimNum();
-    OPS_ERR_IF((mixerDimNum == 2 && xDimNum != 3) || (mixerDimNum == 3 && xDimNum != 4),
-                    OPS_LOG_E(context_->GetNodeName(),
-                             "x dim should match mixes dim, but x dim is %lu and mixes dim is %lu",
-                             xDimNum, mixerDimNum),
-                    return ge::GRAPH_FAILED);
     d_ = (mixerDimNum == 2 ? shapeX->GetStorageShape().GetDim(2) : shapeX->GetStorageShape().GetDim(3));
 
     OPS_ERR_IF(GetAttr() != ge::GRAPH_SUCCESS,
                   OPS_LOG_E(context_->GetNodeName(), "get attr failed."),
                   return ge::GRAPH_FAILED);
-    OPS_ERR_IF(hcMix_ != (2 + hcMult_) * hcMult_,
-                    OPS_LOG_E(context_->GetNodeName(),
-                             "mixes last dim should be (2 + hc_mult) * hc_mult, but is %ld, hc_mult is %ld",
-                             hcMix_, hcMult_),
-                    return ge::GRAPH_FAILED);
-    int64_t xHc = (mixerDimNum == 2 ? shapeX->GetStorageShape().GetDim(1) : shapeX->GetStorageShape().GetDim(2));
-    OPS_ERR_IF(xHc != hcMult_,
-                    OPS_LOG_E(context_->GetNodeName(),
-                             "x hc dim should equal hc_mult, but is %ld, hc_mult is %ld",
-                             xHc, hcMult_),
-                    return ge::GRAPH_FAILED);
-    OPS_ERR_IF(d_ <= 0 || bs_ <= 0 || hcMult_ <= 0,
-                    OPS_LOG_E(context_->GetNodeName(),
-                             "bs, d and hc_mult should be positive, got bs=%ld, d=%ld, hc_mult=%ld",
-                             bs_, d_, hcMult_),
-                    return ge::GRAPH_FAILED);
-    OPS_LOG_I(context_->GetNodeName(),
-              "HcPreSinkhorn shape attrs: mixesDim=%lu, xDim=%lu, bs=%ld, hcMix=%ld, "
-              "hcMult=%ld, xHc=%ld, d=%ld, iterTimes=%ld, eps=%f",
-              mixerDimNum, xDimNum, bs_, hcMix_, hcMult_, xHc, d_, iterTimes_, eps_);
-    if (hcMult_ > 64) {
-        OPS_LOG_I(context_->GetNodeName(),
-                  "HcPreSinkhorn potential kernel limit: hcMult=%ld is greater than 64; "
-                  "SoftmaxFP32Perf documents support only for small R-axis.",
-                  hcMult_);
-    }
 
     return ge::GRAPH_SUCCESS;
 }
@@ -169,7 +134,7 @@ ge::graphStatus HcPreSinkhornTiling::CalcRegbaseOpTiling()
     int64_t mix2Size = rowOnceLoop * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER; 
     int64_t rsqrtSize = RoundUp(rowOnceLoop, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
     int64_t xSize = rowOnceLoop * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-    int64_t ySize = rowOnceLoop * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
+    int64_t ySize = rowOnceLoop * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
     int64_t postSize = rowOnceLoop * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
     int64_t combFragSize = rowOnceLoop * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
     int64_t base0Size = hcMultAlign_ * sizeof(float);
@@ -188,19 +153,12 @@ ge::graphStatus HcPreSinkhornTiling::CalcRegbaseOpTiling()
         int64_t usedUbSize = mix0Size + mix1Size + mix2Size + rsqrtSize + postSize + combFragSize + 
                              base0Size + base1Size + base2Size;
         int64_t ubRemain = ubSize_ - usedUbSize;
-        int64_t minTargetSize = rowOnceLoop * hcMult_ * RoundUp(1, 16) * 2 * DOUBLE_BUFFER * 2;
-        OPS_ERR_IF(ubRemain < minTargetSize,
-                   OPS_LOG_E(context_->GetNodeName(),
-                             "HcPreSinkhorn tiling failed: no available UB for minimum d split, "
-                             "ubSize=%lu, usedUbSize=%ld, ubRemain=%ld, minTargetSize=%ld, hcMult=%ld, d=%ld, bs=%ld",
-                             ubSize_, usedUbSize, ubRemain, minTargetSize, hcMult_, d_, bs_),
-                   return ge::GRAPH_FAILED);
         dFactor_ = d_;
         int64_t base = 2;
         while (1) {
             dFactor_ = CeilDiv(d_, base);
             xSize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-            ySize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
+            ySize = rowOnceLoop * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
             int64_t targetSize = xSize + ySize;
             if (targetSize <= ubRemain) {
                 break;
@@ -222,7 +180,7 @@ ge::graphStatus HcPreSinkhornTiling::CalcRegbaseOpTiling()
             mix2Size = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER; 
             rsqrtSize = RoundUp(rowFactor_, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
             xSize = rowFactor_ * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-            ySize = rowFactor_ * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
+            ySize = rowFactor_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
             postSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
             combFragSize = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
             totalSize = mix0Size + mix1Size + mix2Size + rsqrtSize + xSize + ySize + postSize + combFragSize + 
@@ -257,23 +215,6 @@ ge::graphStatus HcPreSinkhornTiling::CalcRegbaseOpTiling()
     tilingData_.set_tailDFactor(tailDFactor_);
     tilingData_.set_iterTimes(iterTimes_);
     tilingData_.set_eps(eps_);
-    int64_t finalMix0Size = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalMix1Size = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalMix2Size = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalRsqrtSize = RoundUp(rowFactor_, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalXSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
-    int64_t finalYSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
-    int64_t finalPostSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalCombFragSize = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalUbSize = finalMix0Size + finalMix1Size + finalMix2Size + finalRsqrtSize + finalXSize +
-                          finalYSize + finalPostSize + finalCombFragSize + base0Size + base1Size + base2Size;
-    OPS_LOG_I(context_->GetNodeName(),
-              "HcPreSinkhorn regbase tiling: bs=%ld, hcMult=%ld, hcMultAlign=%ld, d=%ld, "
-              "ubSize=%lu, finalUbSize=%ld, usedCoreNums=%lu, rowOfFormerBlock=%ld, rowOfTailBlock=%ld, "
-              "rowFactor=%ld, dLoop=%ld, dFactor=%ld, tailDFactor=%ld, rowLoopFormer=%ld, rowLoopTail=%ld",
-              bs_, hcMult_, hcMultAlign_, d_, ubSize_, finalUbSize, usedCoreNums_, rowOfFormerBlock_,
-              rowOfTailBlock_, rowFactor_, dLoop_, dFactor_, tailDFactor_, rowLoopOfFormerBlock_,
-              rowLoopOfTailBlock_);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -292,14 +233,14 @@ ge::graphStatus HcPreSinkhornTiling::CalcMembaseOpTiling()
     int64_t mix2Size = rowOnceLoop * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER; 
     int64_t rsqrtSize = RoundUp(rowOnceLoop, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
     int64_t xSize = rowOnceLoop * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-    int64_t ySize = rowOnceLoop * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
+    int64_t ySize = rowOnceLoop * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
     int64_t postSize = rowOnceLoop * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
     int64_t combFragSize = rowOnceLoop * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
     int64_t base0Size = hcMultAlign_ * sizeof(float);
     int64_t base1Size = hcMultAlign_ * sizeof(float);
     int64_t base2Size = hcMult_ * hcMultAlign_ * sizeof(float);
     int64_t xCastSize = rowOnceLoop * hcMult_ * RoundUp(d_, 8) * sizeof(float);
-    int64_t yCastSize = rowOnceLoop * hcMult_ * RoundUp(d_, 8) * sizeof(float);
+    int64_t yCastSize = rowOnceLoop * RoundUp(d_, 8) * sizeof(float);
     int64_t rowBrcb0Size = RoundUp(rowOnceLoop, 8) * BLOCK_SIZE;
     int64_t hcBrcb1Size = RoundUp(rowOnceLoop * hcMultAlign_, 8) * BLOCK_SIZE;
     int64_t reduceBufSize = rowOnceLoop * hcMultAlign_ * sizeof(float);
@@ -316,25 +257,14 @@ ge::graphStatus HcPreSinkhornTiling::CalcMembaseOpTiling()
         int64_t usedUbSize = mix0Size + mix1Size + mix2Size + rsqrtSize + postSize + combFragSize + 
                              base0Size + base1Size + base2Size + rowBrcb0Size + hcBrcb1Size + reduceBufSize;
         int64_t ubRemain = ubSize_ - usedUbSize;
-        int64_t minXSize = rowOnceLoop * hcMult_ * RoundUp(1, 16) * 2 * DOUBLE_BUFFER;
-        int64_t minYSize = rowOnceLoop * hcMult_ * RoundUp(1, 16) * 2 * DOUBLE_BUFFER;
-        int64_t minXCastSize = rowOnceLoop * hcMult_ * RoundUp(1, 8) * sizeof(float);
-        int64_t minYCastSize = rowOnceLoop * hcMult_ * RoundUp(1, 8) * sizeof(float);
-        int64_t minTargetSize = minXSize + minYSize + minXCastSize + minYCastSize;
-        OPS_ERR_IF(ubRemain < minTargetSize,
-                   OPS_LOG_E(context_->GetNodeName(),
-                             "HcPreSinkhorn tiling failed: no available UB for minimum d split, "
-                             "ubSize=%lu, usedUbSize=%ld, ubRemain=%ld, minTargetSize=%ld, hcMult=%ld, d=%ld, bs=%ld",
-                             ubSize_, usedUbSize, ubRemain, minTargetSize, hcMult_, d_, bs_),
-                   return ge::GRAPH_FAILED);
         dFactor_ = d_;
         int64_t base = 2;
         while (1) {
             dFactor_ = CeilDiv(d_, base);
             xSize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-            ySize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
+            ySize = rowOnceLoop * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
             xCastSize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
-            yCastSize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
+            yCastSize = rowOnceLoop * RoundUp(dFactor_, 8) * sizeof(float);
             int64_t targetSize = xSize + ySize + xCastSize + yCastSize;
             if (targetSize <= ubRemain) {
                 break;
@@ -356,11 +286,11 @@ ge::graphStatus HcPreSinkhornTiling::CalcMembaseOpTiling()
             mix2Size = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER; 
             rsqrtSize = RoundUp(rowFactor_, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
             xSize = rowFactor_ * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-            ySize = rowFactor_ * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
+            ySize = rowFactor_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
             postSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
             combFragSize = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
             xCastSize = rowFactor_ * hcMult_ * RoundUp(d_, 8) * sizeof(float);
-            yCastSize = rowFactor_ * hcMult_ * RoundUp(d_, 8) * sizeof(float);
+            yCastSize = rowFactor_ * RoundUp(d_, 8) * sizeof(float);
             rowBrcb0Size = RoundUp(rowFactor_, 8) * BLOCK_SIZE;
             hcBrcb1Size = RoundUp(rowFactor_ * hcMultAlign_, 8) * BLOCK_SIZE;
             reduceBufSize = rowFactor_ * hcMultAlign_ * sizeof(float);
@@ -396,30 +326,6 @@ ge::graphStatus HcPreSinkhornTiling::CalcMembaseOpTiling()
     tilingData_.set_tailDFactor(tailDFactor_);
     tilingData_.set_iterTimes(iterTimes_);
     tilingData_.set_eps(eps_);
-    int64_t finalMix0Size = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalMix1Size = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalMix2Size = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalRsqrtSize = RoundUp(rowFactor_, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalXSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
-    int64_t finalYSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
-    int64_t finalPostSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalCombFragSize = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t finalXCastSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
-    int64_t finalYCastSize = rowFactor_ * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
-    int64_t finalRowBrcb0Size = RoundUp(rowFactor_, 8) * BLOCK_SIZE;
-    int64_t finalHcBrcb1Size = RoundUp(rowFactor_ * hcMultAlign_, 8) * BLOCK_SIZE;
-    int64_t finalReduceBufSize = rowFactor_ * hcMultAlign_ * sizeof(float);
-    int64_t finalUbSize = finalMix0Size + finalMix1Size + finalMix2Size + finalRsqrtSize + finalXSize +
-                          finalYSize + finalPostSize + finalCombFragSize + base0Size + base1Size + base2Size +
-                          finalXCastSize + finalYCastSize + finalRowBrcb0Size + finalHcBrcb1Size +
-                          finalReduceBufSize;
-    OPS_LOG_I(context_->GetNodeName(),
-              "HcPreSinkhorn membase tiling: bs=%ld, hcMult=%ld, hcMultAlign=%ld, d=%ld, "
-              "ubSize=%lu, finalUbSize=%ld, usedCoreNums=%lu, rowOfFormerBlock=%ld, rowOfTailBlock=%ld, "
-              "rowFactor=%ld, dLoop=%ld, dFactor=%ld, tailDFactor=%ld, rowLoopFormer=%ld, rowLoopTail=%ld",
-              bs_, hcMult_, hcMultAlign_, d_, ubSize_, finalUbSize, usedCoreNums_, rowOfFormerBlock_,
-              rowOfTailBlock_, rowFactor_, dLoop_, dFactor_, tailDFactor_, rowLoopOfFormerBlock_,
-              rowLoopOfTailBlock_);
     return ge::GRAPH_SUCCESS;
 }
 

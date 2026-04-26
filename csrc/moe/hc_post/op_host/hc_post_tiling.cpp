@@ -1,17 +1,11 @@
 /**
- * Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
  */
 
 /*!
@@ -19,52 +13,11 @@
  * \brief
  */
 
-#include <algorithm>
-
 #include "hc_post_tiling.h"
 #include "hc_post_tiling_arch35.h"
 
 namespace optiling {
 constexpr int64_t DEFAULT_DEAL_DPARAM = 2048;
-constexpr int64_t MIN_DEAL_DPARAM = 16;
-
-namespace {
-int64_t DownAlign(int64_t x, int64_t y)
-{
-    if (y == 0) {
-        return x;
-    }
-    return (x / y) * y;
-}
-
-int64_t RoundUpFloatElements(int64_t num)
-{
-    constexpr int64_t blockSize = 32;
-    return ((num + blockSize / static_cast<int64_t>(sizeof(float)) - 1) /
-            (blockSize / static_cast<int64_t>(sizeof(float)))) *
-           (blockSize / static_cast<int64_t>(sizeof(float)));
-}
-
-int64_t EstimateDSplitUbSize(int64_t dOnceDealing, int64_t hcParam)
-{
-    int64_t xQueSize = 2 * dOnceDealing * 4;
-    int64_t residualQueSize = 2 * dOnceDealing * 4;
-    int64_t postQueSize = 2 * hcParam * 4;
-    int64_t combQueSize = 2 * hcParam * hcParam * 4;
-    int64_t outQueSize = 2 * hcParam * dOnceDealing * 4;
-    int64_t xCastSize = dOnceDealing * 4;
-    int64_t residualCastSize = dOnceDealing * 4;
-    int64_t outCastSize = hcParam * dOnceDealing * 4;
-    int64_t postCastSize = hcParam * 4;
-    int64_t combCastSize = hcParam * hcParam * 4;
-    int64_t postBrcbSize = RoundUpFloatElements(hcParam) * 32;
-    int64_t combBrcbSize = RoundUpFloatElements(hcParam) * 32;
-    int64_t tempSumSize = hcParam * dOnceDealing * 4;
-    return xQueSize + residualQueSize + postQueSize + combQueSize + outQueSize +
-           xCastSize + residualCastSize + outCastSize + postCastSize + combCastSize +
-           postBrcbSize + combBrcbSize + tempSumSize;
-}
-} // namespace
 
 ge::graphStatus HcPostTiling::GetPlatformInfo()
 {
@@ -83,8 +36,6 @@ ge::graphStatus HcPostTiling::GetPlatformInfo()
     OPS_ERR_IF(
         ubSize_ <= 0, OPS_LOG_E(context_->GetNodeName(), "ubSize must be greater than 0."),
         return ge::GRAPH_FAILED);
-
-    ubBlockSize_ = 32;
 
     return ge::GRAPH_SUCCESS;
 }
@@ -113,63 +64,47 @@ ge::graphStatus HcPostTiling::GetInputShapeInfo()
     OPS_ERR_IF(xInput == nullptr, OPS_LOG_E(context_->GetNodeName(), "get xInput nullptr."),
         return ge::GRAPH_FAILED);
     gert::Shape xShape = xInput->GetStorageShape();
-    size_t dimsN = xShape.GetDimNum();
-    OPS_ERR_IF((dimsN != CONST3),
-        OPS_LOG_E(context_->GetNodeName(), "xInput dim:%lu should be 3.", dimsN),
+    size_t xDimsN = xShape.GetDimNum();
+    OPS_ERR_IF((xDimsN != CONST2 && xDimsN != CONST3),
+        OPS_LOG_E(context_->GetNodeName(), "xInput dim:%lu should be 2 or 3.", xDimsN),
         return ge::GRAPH_FAILED);
 
     auto residualInput = context_->GetInputShape(INPUT_IDX_RESIDUAL);
     OPS_ERR_IF(residualInput == nullptr, OPS_LOG_E(context_->GetNodeName(), "get residualInput nullptr."),
         return ge::GRAPH_FAILED);
     gert::Shape residualShape = residualInput->GetStorageShape();
-    dimsN = residualShape.GetDimNum();
-    OPS_ERR_IF((dimsN != CONST4),
-        OPS_LOG_E(context_->GetNodeName(), "residualInput dim:%lu should be 4.", dimsN),
+    size_t residualDimsN = residualShape.GetDimNum();
+    OPS_ERR_IF((residualDimsN != xDimsN + 1),
+        OPS_LOG_E(context_->GetNodeName(), "residualInput dim:%lu should be %lu.", residualDimsN, xDimsN + 1),
         return ge::GRAPH_FAILED);
 
     auto postInput = context_->GetInputShape(INPUT_IDX_POST);
     OPS_ERR_IF(postInput == nullptr, OPS_LOG_E(context_->GetNodeName(), "get residualInput nullptr."),
         return ge::GRAPH_FAILED);
     gert::Shape postShape = postInput->GetStorageShape();
-    dimsN = postShape.GetDimNum();
-    OPS_ERR_IF((dimsN != CONST3),
-        OPS_LOG_E(context_->GetNodeName(), "postInput dim:%lu should be 3.", dimsN),
+    size_t postDimsN = postShape.GetDimNum();
+    OPS_ERR_IF((postDimsN != xDimsN),
+        OPS_LOG_E(context_->GetNodeName(), "postInput dim:%lu should be %lu.", postDimsN, xDimsN),
         return ge::GRAPH_FAILED);
 
     auto combInput = context_->GetInputShape(INPUT_IDX_COMB);
     OPS_ERR_IF(combInput == nullptr, OPS_LOG_E(context_->GetNodeName(), "get residualInput nullptr."),
         return ge::GRAPH_FAILED);
     gert::Shape combShape = combInput->GetStorageShape();
-    dimsN = combShape.GetDimNum();
-    OPS_ERR_IF((dimsN != CONST4),
-        OPS_LOG_E(context_->GetNodeName(), "combInput dim:%lu should be 4.", dimsN),
+    size_t combDimsN = combShape.GetDimNum();
+    OPS_ERR_IF((combDimsN != xDimsN + 1),
+        OPS_LOG_E(context_->GetNodeName(), "combInput dim:%lu should be %lu.", combDimsN, xDimsN + 1),
         return ge::GRAPH_FAILED);
-    bParam_ = xShape.GetDim(DIM_INDEX_0);
-    sParam_ = xShape.GetDim(DIM_INDEX_1);
-    dParam_ = xShape.GetDim(DIM_INDEX_2);
-    hcParam_ = residualShape.GetDim(DIM_INDEX_2);
-    OPS_ERR_IF((bParam_ <= 0 || sParam_ <= 0 || dParam_ <= 0 || hcParam_ <= 0),
-        OPS_LOG_E(context_->GetNodeName(), "b, s, d and hc should be positive, got b=%ld, s=%ld, d=%ld, hc=%ld.",
-                  bParam_, sParam_, dParam_, hcParam_),
-        return ge::GRAPH_FAILED);
-    OPS_ERR_IF((residualShape.GetDim(DIM_INDEX_0) != bParam_ ||
-                residualShape.GetDim(DIM_INDEX_1) != sParam_ ||
-                residualShape.GetDim(DIM_INDEX_3) != dParam_),
-        OPS_LOG_E(context_->GetNodeName(), "residual shape should be [b, s, hc, d]."),
-        return ge::GRAPH_FAILED);
-    OPS_ERR_IF((postShape.GetDim(DIM_INDEX_0) != bParam_ ||
-                postShape.GetDim(DIM_INDEX_1) != sParam_ ||
-                postShape.GetDim(DIM_INDEX_2) != hcParam_),
-        OPS_LOG_E(context_->GetNodeName(), "post shape should be [b, s, hc]."),
-        return ge::GRAPH_FAILED);
-    OPS_ERR_IF((combShape.GetDim(DIM_INDEX_0) != bParam_ ||
-                combShape.GetDim(DIM_INDEX_1) != sParam_ ||
-                combShape.GetDim(DIM_INDEX_2) != hcParam_ ||
-                combShape.GetDim(DIM_INDEX_3) != hcParam_),
-        OPS_LOG_E(context_->GetNodeName(), "comb shape should be [b, s, hc, hc]."),
-        return ge::GRAPH_FAILED);
-    tilingData_.set_bParam(bParam_);
-    tilingData_.set_sParam(sParam_);
+    if (xDimsN == CONST2) {
+        bsParam_ = xShape.GetDim(DIM_INDEX_0);
+        dParam_ = xShape.GetDim(DIM_INDEX_1);
+        hcParam_ = residualShape.GetDim(DIM_INDEX_1);
+    } else {
+        bsParam_ = xShape.GetDim(DIM_INDEX_0) * xShape.GetDim(DIM_INDEX_1);
+        dParam_ = xShape.GetDim(DIM_INDEX_2);
+        hcParam_ = residualShape.GetDim(DIM_INDEX_2);
+    }
+    tilingData_.set_bsParam(bsParam_);
     tilingData_.set_dParam(dParam_);
     tilingData_.set_hcParam(hcParam_);
 
@@ -219,7 +154,7 @@ ge::graphStatus HcPostTiling::GetInputDtypeInfo()
 
 ge::graphStatus HcPostTiling::DoOpTiling()
 {
-    int64_t batchSize = bParam_ * sParam_;
+    int64_t batchSize = bsParam_;
 
     int64_t useCoreNum = batchSize < coreNum_ ? batchSize : coreNum_;
     int64_t batchOneCore = CeilDiv(batchSize, static_cast<int64_t>(useCoreNum));
@@ -229,21 +164,10 @@ ge::graphStatus HcPostTiling::DoOpTiling()
     tilingData_.set_batchOneCore(batchOneCore);
     tilingData_.set_batchOneCoreTail(batchOneCoreTail);
     tilingData_.set_frontCore(frontCore);
-    int64_t dOnceDealing = std::min(dParam_, DEFAULT_DEAL_DPARAM);
-    while (dOnceDealing > MIN_DEAL_DPARAM &&
-           EstimateDSplitUbSize(dOnceDealing, hcParam_) > ubSize_) {
-        dOnceDealing = std::max(MIN_DEAL_DPARAM, DownAlign(dOnceDealing / 2, MIN_DEAL_DPARAM));
-    }
-    OPS_ERR_IF(EstimateDSplitUbSize(dOnceDealing, hcParam_) > ubSize_,
-        OPS_LOG_E(context_->GetNodeName(),
-                  "HcPost tiling failed: no available UB, ubSize=%ld, required=%ld, hc=%ld, dOnce=%ld, d=%ld",
-                  ubSize_, EstimateDSplitUbSize(dOnceDealing, hcParam_), hcParam_, dOnceDealing, dParam_),
-        return ge::GRAPH_FAILED);
-
-    int64_t dSplitTime = dParam_ / dOnceDealing;
+    int64_t dSplitTime = dParam_ / DEFAULT_DEAL_DPARAM;
     tilingData_.set_dSplitTime(dSplitTime);
-    tilingData_.set_dOnceDealing(dOnceDealing);
-    tilingData_.set_dLastDealing(dParam_ % dOnceDealing);
+    tilingData_.set_dOnceDealing(DEFAULT_DEAL_DPARAM);
+    tilingData_.set_dLastDealing(dParam_ - dSplitTime * DEFAULT_DEAL_DPARAM);
     context_->SetBlockDim(useCoreNum);
 
     return ge::GRAPH_SUCCESS;
@@ -253,7 +177,7 @@ ge::graphStatus HcPostTiling::PostTiling()
 {
     context_->SetTilingKey(0);
     size_t* workspaces = context_->GetWorkspaceSizes(1);
-    workspaces[0] = static_cast<size_t>(16 * 1024 * 1024);
+    workspaces[0] = WORKSPACE_SIZE;
     tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
     context_->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());
     return ge::GRAPH_SUCCESS;
