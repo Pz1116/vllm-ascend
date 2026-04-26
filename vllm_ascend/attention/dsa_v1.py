@@ -873,6 +873,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                                                     input_positions.device)
                 },
                 use_cache=True)
+            self.decode_ratio_to_sas_metadata[layer_name + "_cos"] = compress_cos
+            self.decode_ratio_to_sas_metadata[layer_name + "_sin"] = compress_sin
         else:
             compress_cos = self.decode_ratio_to_sas_metadata[layer_name + "_cos"]
             compress_sin = self.decode_ratio_to_sas_metadata[layer_name + "_sin"]
