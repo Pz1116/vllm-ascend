@@ -107,6 +107,7 @@ def select_experts(
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
             tid2eid=None,
@@ -262,13 +263,20 @@ def _select_experts_with_fusion_ops(
             tid2eid=tid2eid_ones,  # 词表到专家id的映射关系表（可选）
             k_group=topk_group,  # 选取的组数量（可选）
             group_count=num_expert_group,  # 总组数（可选）
-            routed_scaling_factor=routed_scaling_factor,  # 路由缩放因子（可选）
+            routed_scaling_factor=1.0,  # Scale after optional renorm below.
             eps=float(1e-20),  # 数值稳定性参数（可选）
             group_select_mode=1,  # 组选择模式（可选）
-            renorm=0,  # 重归一化标志（可选）
+            # The hash custom op currently rejects renorm != 0. Apply
+            # norm_topk_prob in Python below before returning to MoE compute.
+            renorm=0,
             norm_type=2,  # 归一化类型（可选）
             out_flag=False  # 是否输出归一化结果（可选）
         )
+        # Match DeepSeek V4 routing: normalize sqrtsoftplus top-k weights
+        # before applying the routed scale. DSV4 non-AITER callers pass 1.0
+        # here and scale the routed output later with muls_add_triton.
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        topk_weights = topk_weights * routed_scaling_factor
         return topk_weights, topk_ids
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
@@ -300,6 +308,7 @@ def _native_select_experts(
     num_expert_group: int | None = None,
     custom_routing_function: Callable | None = None,
     scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
     global_num_experts: torch.Tensor | None = None,
     use_hash: bool = False,
@@ -333,13 +342,13 @@ def _native_select_experts(
         topk_weights = router_logits.softmax(dim=-1)
     elif scoring_func == "sigmoid":
         topk_weights = router_logits.sigmoid()
-    elif scoring_func == "softplus":
-        topk_weights = F.softplus(topk_weights).sqrt()
+    elif scoring_func == "sqrtsoftplus":
+        topk_weights = F.softplus(router_logits).sqrt()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     if use_grouped_topk:
-        return _select_expert_use_group_topk(
+        topk_weights, topk_ids = _select_expert_use_group_topk(
             topk_weights=topk_weights,
             top_k=top_k,
             renormalize=renormalize,
@@ -347,6 +356,7 @@ def _native_select_experts(
             num_expert_group=num_expert_group,
             e_score_correction_bias=e_score_correction_bias,
         )
+        return topk_weights * routed_scaling_factor, topk_ids
     
     if e_score_correction_bias is not None:
         topk_weights = topk_weights + e_score_correction_bias
@@ -369,6 +379,7 @@ def _native_select_experts(
     # Required by npu_moe_init_routing
     topk_ids = topk_ids.to(torch.int32)
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+    topk_weights = topk_weights * routed_scaling_factor
 
     return topk_weights, topk_ids
 

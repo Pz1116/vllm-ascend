@@ -215,8 +215,10 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
+            tid2eid=tid2eid,
         )
 
         topk_ids = topk_ids.to(torch.int32)
