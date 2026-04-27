@@ -29,7 +29,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (AscendDeviceType, attention_calculation_stream,
-                               get_ascend_device_type, npu_stream_switch,
+                               get_ascend_device_type, npu_stream_switch, get_dsv4_compress_ratio, extract_dsv4_layer_index,
                                olora_tp_enable)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -329,11 +329,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
-        layer_idx = extract_layer_index(layer_names[0])
-        self.compressor_ratio = getattr(self.vllm_config.model_config.hf_config,  "compress_ratios", 0)[layer_idx]
+        hf_config = self.model_config.hf_config
+        layer_idx = extract_dsv4_layer_index(hf_config, layer_names[0])
+        self.compressor_ratio = get_dsv4_compress_ratio(hf_config, layer_idx)
 
         if AscendDSAMetadataBuilder.hadamard is None:
-            hf_config = self.model_config.hf_config
             if hf_config.model_type == 'deepseek_v4':
                 indexer_head_dim = hf_config.index_head_dim
                 try:

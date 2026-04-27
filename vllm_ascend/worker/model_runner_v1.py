@@ -2738,10 +2738,23 @@ class NPUModelRunner(GPUModelRunner):
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
-        from vllm.v1.worker.utils import bind_kv_cache
+        if self.model_config.hf_text_config.model_type == "deepseek_v4":
+            from vllm_ascend.utils import extract_dsv4_layer_index
 
-        num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
-        bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches, num_attn_module)
+            assert len(self.kv_caches) == 0
+            for layer_name in sorted(
+                    kv_caches,
+                    key=lambda name: (extract_dsv4_layer_index(
+                        self.model_config.hf_text_config, name), name)):
+                self.kv_caches.append(kv_caches[layer_name])
+            for layer_name, kv_cache in kv_caches.items():
+                self.compilation_config.static_forward_context[
+                    layer_name].kv_cache = [kv_cache]
+        else:
+            from vllm.v1.worker.utils import bind_kv_cache
+
+            num_attn_module = 2 if self.model_config.hf_text_config.model_type == "longcat_flash" else 1
+            bind_kv_cache(kv_caches, self.compilation_config.static_forward_context, self.kv_caches, num_attn_module)
         return kv_caches
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:

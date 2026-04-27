@@ -68,6 +68,39 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
+
+
+def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
+    """Extract DSV4 index for config per-layer arrays.
+
+    Runtime module names keep their original MTP namespace, e.g. ``mtp.0``.
+    When indexing config-level arrays such as ``compress_ratios``, MTP layers
+    are addressed after the main model layers.
+    """
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    layer_idx = extract_layer_index(layer_name)
+    if ".mtp." in f".{layer_name}." and layer_idx < config.num_hidden_layers:
+        return config.num_hidden_layers + layer_idx
+    return layer_idx
+
+
+def get_dsv4_spec_layer_idx_from_weight_name(config: Any,
+                                             weight_name: str) -> int | None:
+    """Return local MTP layer index for DSV4 checkpoint weight names."""
+    if weight_name.startswith("mtp."):
+        return int(weight_name.split(".")[1])
+    return None
+
+
+def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
+    """Return DSV4 compress ratio, treating unspecified MTP layers as dense."""
+    compress_ratios = getattr(config, "compress_ratios", None)
+    if compress_ratios is None or layer_idx >= len(compress_ratios):
+        return 0
+    return compress_ratios[layer_idx]
+
+
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()

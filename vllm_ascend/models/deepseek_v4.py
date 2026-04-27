@@ -70,6 +70,8 @@ from vllm.model_executor.layers.deepseek_compressor import CompressorStateCache
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
+    extract_dsv4_layer_index,
+    get_dsv4_compress_ratio,
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -608,6 +610,7 @@ class DeepseekV4Attention(nn.Module):
         super().__init__()
         layer_idx = int(prefix.split(sep=".")[-2])
         self.layer_idx = layer_idx
+        config_layer_idx = extract_dsv4_layer_index(config, prefix)
         tp_size = get_tensor_model_parallel_world_size()
         self.dim = config.hidden_size
         self.n_heads = config.num_attention_heads
@@ -669,7 +672,8 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
             return_bias=False,
         )
-        self.compress_ratio = config.compress_ratios[layer_idx]
+        self.compress_ratio = get_dsv4_compress_ratio(config,
+                                                      config_layer_idx)
 
         if self.compress_ratio > 1:
             config.rope_parameters['rope_theta'] = config.compress_rope_theta
