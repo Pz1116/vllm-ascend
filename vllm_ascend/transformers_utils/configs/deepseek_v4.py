@@ -200,10 +200,24 @@ class DeepseekV4Config(PretrainedConfig):
         max_position_embeddings=163840,
         **kwargs,
     ):
+        # The public DeepSeek V4 config uses HF-style field names while the
+        # local model implementation still reads the original DSV4 aliases.
+        # Normalize them before PretrainedConfig stores unknown kwargs as attrs,
+        # otherwise fields such as Pro's moe_intermediate_size=3072 silently
+        # leave config.moe_inter_dim at its 2048 default.
+        moe_inter_dim = kwargs.pop("moe_intermediate_size", moe_inter_dim)
+        n_hash_layers = kwargs.pop("num_hash_layers", n_hash_layers)
+        score_func = kwargs.pop("scoring_func", score_func)
+        rope_head_dim = kwargs.pop("qk_rope_head_dim", rope_head_dim)
+        norm_eps = kwargs.pop("rms_norm_eps", norm_eps)
+        window_size = kwargs.pop("sliding_window", window_size)
+
         # base
         self.vocab_size = vocab_size
         self.moe_inter_dim = moe_inter_dim
+        self.moe_intermediate_size = moe_inter_dim
         self.n_hash_layers = n_hash_layers
+        self.num_hash_layers = n_hash_layers
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.moe_layer_freq = moe_layer_freq
@@ -214,6 +228,7 @@ class DeepseekV4Config(PretrainedConfig):
         self.n_shared_experts = n_shared_experts
         self.n_activated_experts = n_activated_experts
         self.score_func = score_func
+        self.scoring_func = score_func
         self.num_experts_per_tok = num_experts_per_tok
         self.first_k_dense_replace = first_k_dense_replace
         self.topk_method = topk_method
@@ -223,10 +238,13 @@ class DeepseekV4Config(PretrainedConfig):
         self.q_lora_rank = q_lora_rank
         self.head_dim = head_dim
         self.rope_head_dim = rope_head_dim
+        self.qk_rope_head_dim = rope_head_dim
         self.norm_eps = norm_eps
+        self.rms_norm_eps = norm_eps
         self.o_groups = o_groups
         self.o_lora_rank = o_lora_rank
         self.window_size = window_size
+        self.sliding_window = window_size
         self.compress_ratios = compress_ratios
         # NOTE: This is only for making is_deepseek_mla is True
         self.kv_lora_rank = o_lora_rank
@@ -244,8 +262,6 @@ class DeepseekV4Config(PretrainedConfig):
         self.scale_fmt = scale_fmt
 
         #
-        self.moe_intermediate_size = moe_inter_dim
-        self.rms_norm_eps = 1e-6
         self.pad_token_id = None
         self.bos_token_id = 0
         self.eos_token_id = 1
