@@ -1239,6 +1239,10 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
+    if model_config.hf_config.model_type == "deepseek_v4":
+        # TODO(qcs): generalize the block_size
+        cache_config.block_size = 128
+
     if not scheduler_config or not model_config:
         return
 
