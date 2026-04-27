@@ -311,7 +311,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 got {self.decode_threshold}"
 
         self.reorder_batch_threshold = self.decode_threshold
-        self.rope_dim = self.model_config.hf_text_config.rope_head_dim
+        self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
 
@@ -684,7 +684,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     batch_size=len(self.seq_lens[reqs_start:]),
                     cmp_ratio=1,
                     ori_mask_mode=4,  # 4:sliding window
-                    ori_win_left=self.model_config.hf_config.window_size - 1,
+                    ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
                     layout_kv="TND" if self.enable_kv_tnd else "PA_ND",
@@ -711,7 +711,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cmp_ratio=4,
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
-                    ori_win_left=self.model_config.hf_config.window_size - 1,
+                    ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
                     layout_kv="TND" if self.enable_kv_tnd else "PA_ND",
@@ -736,7 +736,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cmp_ratio=128,  #
                     ori_mask_mode=4,  # 4:sliding window
                     cmp_mask_mode=3,  # 3:causal
-                    ori_win_left=self.model_config.hf_config.window_size - 1,
+                    ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
                     layout_kv="TND" if self.enable_kv_tnd else "PA_ND",
@@ -927,7 +927,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cmp_ratio=1,
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
-                    ori_win_left=self.model_config.hf_config.window_size - 1,
+                    ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
                     layout_kv="PA_ND",
@@ -954,7 +954,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cmp_ratio=4,
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
-                    ori_win_left=self.model_config.hf_config.window_size - 1,
+                    ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
                     layout_kv="PA_ND",
@@ -979,7 +979,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cmp_ratio=128,
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
-                    ori_win_left=self.model_config.hf_config.window_size - 1,
+                    ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
                     layout_kv="PA_ND",
