@@ -361,8 +361,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
-        ascend_config = get_ascend_config()
-        self.enable_kv_tnd = ascend_config.enable_kv_tnd
         # Note(qcs): we use two dimension slot_mapping for kvcache with shape [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros((vllm_config.scheduler_config.max_num_batched_tokens, 2), dtype=torch.int32, device=self.device)
 
@@ -654,18 +652,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
         index_topk = self.model_config.hf_config.index_topk
 
-        if self.enable_kv_tnd:
-            if self.prefill_ratio_to_sas_metadata.get("cu_c4_cmp_seqlen_list", None) is None:
-                cu_c4_cmp_seqlen_list = _get_cmp_seq_lens(prefill_seq_lens, 4)
-                cu_c128_cmp_seqlen_list = _get_cmp_seq_lens(prefill_seq_lens, 128)
-                self.prefill_ratio_to_sas_metadata["cu_c4_cmp_seqlen_list"] = cu_c4_cmp_seqlen_list
-                self.prefill_ratio_to_sas_metadata["cu_c128_cmp_seqlen_list"] = cu_c128_cmp_seqlen_list
-            else:
-                cu_c4_cmp_seqlen_list = self.prefill_ratio_to_sas_metadata["cu_c4_cmp_seqlen_list"]
-                cu_c128_cmp_seqlen_list = self.prefill_ratio_to_sas_metadata["cu_c128_cmp_seqlen_list"]
-        else:
-            cu_c4_cmp_seqlen_list = None
-            cu_c128_cmp_seqlen_list = None
+        cu_c4_cmp_seqlen_list = None
+        cu_c128_cmp_seqlen_list = None
 
         layer_name = f"c{self.compressor_ratio}"
         if self.compressor_ratio <= 1:
@@ -687,7 +675,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="TND" if self.enable_kv_tnd else "PA_ND",
+                    layout_kv="PA_ND",
                     has_ori_kv=True,
                     has_cmp_kv=False,
                     device=str(self.seqused_q.device))
@@ -714,7 +702,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="TND" if self.enable_kv_tnd else "PA_ND",
+                    layout_kv="PA_ND",
                     has_ori_kv=True,
                     has_cmp_kv=True,
                     device=str(self.seqused_q.device))
@@ -739,7 +727,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="TND" if self.enable_kv_tnd else "PA_ND",
+                    layout_kv="PA_ND",
                     has_ori_kv=True,
                     has_cmp_kv=True,
                     device=str(self.seqused_q.device))
@@ -1122,7 +1110,6 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.multistream_dsa_preprocess = ascend_config.multistream_dsa_preprocess
-        self.enable_kv_tnd = ascend_config.enable_kv_tnd
 
         self.vllm_config = get_current_vllm_config()
 
@@ -1381,12 +1368,10 @@ class AscendDSAImpl(DSAAttentionImpl):
                 compressor_attn_metadata.prefill.slot_mapping,
                 compressed_kv)
 
-        sliding_window_kv = kv if self.enable_kv_tnd else swa_kv_cache
-
         if self.compress_ratio <= 1:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
-                ori_kv=sliding_window_kv,
+                ori_kv=swa_kv_cache,
                 ori_block_table=swa_metadata.prefill.block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
                 cu_seqlens_ori_kv=actual_seq_lengths_query,
@@ -1399,13 +1384,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="TND" if self.enable_kv_tnd else "PA_ND")[0]
+                layout_kv="PA_ND")[0]
         elif self.compress_ratio == 4:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
-                ori_kv=sliding_window_kv,
-                cmp_kv=compressed_kv.unsqueeze(1)
-                if self.enable_kv_tnd else compress_kv_cache,
+                ori_kv=swa_kv_cache,
+                cmp_kv=compress_kv_cache,
                 cmp_sparse_indices=compress_topk_idxs,
                 ori_block_table=swa_metadata.prefill.block_table,
                 cmp_block_table=compressor_attn_metadata.prefill.block_table,
@@ -1422,13 +1406,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="TND" if self.enable_kv_tnd else "PA_ND")[0]
+                layout_kv="PA_ND")[0]
         else:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
-                ori_kv=sliding_window_kv,
-                cmp_kv=compressed_kv.unsqueeze(1)
-                if self.enable_kv_tnd else compress_kv_cache,
+                ori_kv=swa_kv_cache,
+                cmp_kv=compress_kv_cache,
                 ori_block_table=swa_metadata.prefill.block_table,
                 cmp_block_table=compressor_attn_metadata.prefill.block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
@@ -1445,7 +1428,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="TND" if self.enable_kv_tnd else "PA_ND")[0]
+                layout_kv="PA_ND")[0]
         return attn_output
 
     def _forward_decode(
