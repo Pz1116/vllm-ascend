@@ -1144,7 +1144,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             self.indexcom_head_dim = self.indexer.compressor.head_dim
             self.indexcom_rotate = self.indexer.compressor.rotate
-            self.index_topk = self.model_config.hf_config.index_topk
+            self.index_topk = self.indexer.index_topk
 
         # compress param
         if self.compressor is not None:
