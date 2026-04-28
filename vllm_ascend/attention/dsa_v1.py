@@ -907,7 +907,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         tp_size = get_tensor_model_parallel_world_size()
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
-        index_topk = 512
+        index_topk = self.model_config.hf_config.index_topk
 
         assert self.decode_sas_metadata is not None
         if self.compressor_ratio <= 1:
@@ -1144,7 +1144,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             self.indexcom_head_dim = self.indexer.compressor.head_dim
             self.indexcom_rotate = self.indexer.compressor.rotate
-            self.index_topk = 512
+            self.index_topk = self.model_config.hf_config.index_topk
 
         # compress param
         if self.compressor is not None:
@@ -1800,7 +1800,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             key_quant_mode=0,
             layout_query="TND",
             layout_key="PA_BSND",
-            sparse_count=512,
+            sparse_count=self.index_topk,
             sparse_mode=3,
             pre_tokens=(1 << 63) - 1,
             next_tokens=(1 << 63) - 1,
