@@ -70,7 +70,7 @@ public:
             .DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "hc_pre");
-        this->AICore().AddConfig("ascend950", regbaseCfg);
+        this->AICore().AddConfig("ascend910_95", regbaseCfg);
     }
 };
 OP_ADD(HcPre);
