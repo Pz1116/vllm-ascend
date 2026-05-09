@@ -26,7 +26,7 @@ class KVTransferThread(threading.Thread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: int | list[int],
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,
@@ -85,6 +85,11 @@ class KVTransferThread(threading.Thread):
 
     def _handle_request(self, req_meta: Any):
         pass
+
+    def _get_block_size(self, kv_cache_group_id: int = 0) -> int:
+        if isinstance(self.block_size, list):
+            return self.block_size[kv_cache_group_id]
+        return self.block_size
 
     def lookup(
         self,
@@ -145,7 +150,7 @@ class KVTransferThread(threading.Thread):
             return
 
         for start, end, key in self.token_database.process_tokens(token_len, block_hashes, mask_num):
-            block_id = block_ids[start // self.block_size]
+            block_id = block_ids[start // self._get_block_size(kv_cache_group_id)]
             if skip_null_blocks and block_id <= 0:
                 continue
             yield start, end, key, block_id
@@ -175,7 +180,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: int | list[int],
         tp_rank: int,
         dcp_size: int,
         put_step: int,
@@ -234,6 +239,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 keys = []
                 block_hashes = []
                 block_ids = block_ids_by_group[group_id]
+                group_block_size = self._get_block_size(group_id)
 
                 for start, end, key, _ in self._process_tokens_with_block_ids(
                     token_len,
@@ -246,7 +252,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     starts.append(start)
                     ends.append(end)
                     keys.append(key.to_string())
-                    block_hashes.append(req_meta.block_hashes[start // self.block_size])
+                    block_hashes.append(req_meta.block_hashes[start // group_block_size])
 
                 if not self.dcp_size > 1:
                     starts = starts[self.tp_rank % self.put_step :: self.put_step]
@@ -270,11 +276,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
-                        "Storing %s cache for %d out of %d blocks "
-                        "(missing_count=%d) for request %s in group %d",
+                        "Storing %s cache for %d out of %d blocks (missing_count=%d) for request %s in group %d",
                         cache_role,
                         len(keys),
-                        token_len // self.block_size,
+                        token_len // group_block_size,
                         len(missing_indices),
                         req_id,
                         group_id,
@@ -305,11 +310,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     # Create KV event only for KV cache writes.
                     if self.enable_kv_event and cache_role == "kv":
                         token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
+                        block_size = (
+                            req_meta.original_block_size[group_id]
+                            if isinstance(req_meta.original_block_size, list)
+                            else req_meta.original_block_size
+                            if req_meta.original_block_size is not None
+                            else None
+                        )
                         stored_event = BlockStored(
                             block_hashes=[new_block_hashes[index]],
                             parent_block_hash=prev_key,
                             token_ids=token_ids,
-                            block_size=req_meta.original_block_size,
+                            block_size=block_size,
                             lora_id=None,
                             medium="cpu",
                             lora_name=None,
@@ -338,7 +350,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: int | list[int],
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,
@@ -350,11 +362,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
-        mask_num = (
-            req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
-            // self.block_size
-            * self.block_size
-        )
         addr_list = []
         size_list = []
         key_list = []
@@ -365,6 +372,12 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         for cache_role, cache_group_ids, block_ids_by_group in cache_groups:
             for group_id in cache_group_ids:
                 block_ids = block_ids_by_group[group_id]
+                group_block_size = self._get_block_size(group_id)
+                mask_num = (
+                    req_meta.load_spec.vllm_cached_tokens  # type: ignore[union-attr]
+                    // group_block_size
+                    * group_block_size
+                )
                 for start, end, key, _ in self._process_tokens_with_block_ids(
                     token_len,
                     req_meta.block_hashes,
@@ -401,7 +414,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: int | list[int],
         tp_rank: int,
         dcp_size: int,
         put_step: int,
@@ -487,7 +500,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self,
         m_store: Backend,
         token_database: ChunkedTokenDatabase,
-        block_size: int,
+        block_size: int | list[int],
         tp_rank: int,
         dcp_size: int,
         ready_event: threading.Event,

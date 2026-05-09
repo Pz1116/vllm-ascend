@@ -7,7 +7,7 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, BlockHashListWithBlockSize
 from vllm.v1.core.sched.output import NewRequestData
 
 
@@ -164,9 +164,16 @@ def infer_group_cache_families(
 
 
 class ChunkedTokenDatabase:
-    def __init__(self, metadata: KeyMetadata, block_size: int, partitions: list[int] | None):
+    def __init__(
+        self,
+        metadata: KeyMetadata,
+        block_size: int | list[int],
+        partitions: list[int] | None,
+        use_hybrid: bool = False,
+        hash_block_size: int | None = None,
+    ):
         self.metadata = metadata
-        self.block_size = block_size
+        self.block_size = block_size if isinstance(block_size, list) else [block_size]
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
         self.block_size_scale: list[int] = []
@@ -181,6 +188,8 @@ class ChunkedTokenDatabase:
             "state": {},
         }
         self.partitions = partitions
+        self.use_hybrid = use_hybrid
+        self.hash_block_size = self.block_size[0] if hash_block_size is None else hash_block_size
 
     def _make_key_by_hash(
         self,
@@ -215,6 +224,11 @@ class ChunkedTokenDatabase:
 
     def set_block_size_scale(self, block_size_scale: list[int]):
         self.block_size_scale = block_size_scale
+
+    def get_block_size(self, kv_cache_group_id: int) -> int:
+        if kv_cache_group_id >= len(self.block_size):
+            return self.block_size[0]
+        return self.block_size[kv_cache_group_id]
 
     def set_group_buffers(
         self,
@@ -258,14 +272,15 @@ class ChunkedTokenDatabase:
     ):
         addr_list = []
         size_list = []
-        block_id = block_ids[start // self.block_size]
+        group_block_size = self.get_block_size(kv_cache_group_id)
+        block_id = block_ids[start // group_block_size]
         group_addrs, group_block_len, group_block_size_scale = self._get_group_buffers(kv_cache_group_id, cache_role)
         length = len(group_block_len)
         for index, base_addr in enumerate(group_addrs):
             block_len = group_block_len[index % length]
             block_size_scale = group_block_size_scale[index % length] if group_block_size_scale else 1
             addr = base_addr + block_id * block_len * block_size_scale
-            size = int(block_len * block_size_scale / self.block_size * (end - start))
+            size = int(block_len * block_size_scale / group_block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
@@ -286,13 +301,14 @@ class ChunkedTokenDatabase:
         )
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
-        block_id = block_ids[start // self.block_size]
+        group_block_size = self.get_block_size(0)
+        block_id = block_ids[start // group_block_size]
         addr_list = []
         size_list = []
         length = len(self.block_len)
         for i in range(length):
             addr = self.kv_caches_base_addr[layer_id * length] + block_id * self.block_len[i]
-            size = int(self.block_len[i] / self.block_size * (end - start))
+            size = int(self.block_len[i] / group_block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list
@@ -300,7 +316,7 @@ class ChunkedTokenDatabase:
     def process_tokens(
         self,
         token_len: int,
-        block_hashes: list[BlockHash] | list[str],
+        block_hashes: BlockHashList | list[str],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
@@ -328,6 +344,13 @@ class ChunkedTokenDatabase:
         """
         if not block_hashes:
             return
+        group_block_size = self.get_block_size(kv_cache_group_id)
+        if not isinstance(block_hashes[0], str):
+            block_hashes = get_block_hashes(
+                block_hashes,
+                group_block_size,
+                self.hash_block_size,
+            )
         if not isinstance(block_hashes[0], str):
             block_hashes = [
                 h.hex()  # type: ignore[union-attr]
@@ -335,10 +358,10 @@ class ChunkedTokenDatabase:
             ]
         start_idx = 0
         for chunk_id, hash_val in enumerate(block_hashes):
-            start_idx = chunk_id * self.block_size
+            start_idx = chunk_id * group_block_size
             if start_idx >= token_len:
                 break
-            end_idx = min(start_idx + self.block_size, token_len)
+            end_idx = min(start_idx + group_block_size, token_len)
             if start_idx < mask_num:
                 continue
             else:
@@ -356,7 +379,7 @@ class ChunkedTokenDatabase:
     def process_tokens_with_block_ids(
         self,
         token_len: int,
-        block_hashes: list[BlockHash] | list[str],
+        block_hashes: BlockHashList | list[str],
         block_ids: list[int],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
@@ -372,7 +395,7 @@ class ChunkedTokenDatabase:
             cache_role=cache_role,
             cache_family=cache_family,
         ):
-            block_idx = start_idx // self.block_size
+            block_idx = start_idx // self.get_block_size(kv_cache_group_id)
             if block_idx >= len(block_ids):
                 continue
             block_id = block_ids[block_idx]
@@ -415,6 +438,12 @@ def normalize_block_ids_by_group(block_ids: tuple[list[int], ...] | list[int] | 
         flat_block_ids = cast(list[int], block_ids)
         return [flat_block_ids.copy()]
     raise ValueError(f"Unsupported block_ids type {type(block_ids)}")
+
+
+def get_block_hashes(block_hashes: BlockHashList, group_block_size: int, hash_block_size: int) -> BlockHashList:
+    if group_block_size == hash_block_size:
+        return block_hashes
+    return BlockHashListWithBlockSize(block_hashes, hash_block_size, group_block_size)
 
 
 # Parameters related to the connector metadata
@@ -520,7 +549,7 @@ class ReqMeta:
     # The following parameters are only used for kv event generation
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
     token_ids: list[int] | None = None
-    original_block_size: int | None = None
+    original_block_size: list[int] | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -531,7 +560,7 @@ class ReqMeta:
         block_hashes: list[BlockHash] | None = None,
         is_last_chunk: bool | None = None,
         discard_partial_chunks: bool = True,
-        original_block_size: int | None = None,
+        original_block_size: list[int] | None = None,
         kv_cache_group_families: list[str] | None = None,
         state_group_ids: list[int] | None = None,
         state_cache_group_families: list[str] | None = None,

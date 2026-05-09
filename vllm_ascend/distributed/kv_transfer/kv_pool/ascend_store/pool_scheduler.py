@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Any
 
 import vllm.envs as envs
@@ -81,12 +82,11 @@ class KVPoolScheduler:
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
-        self.original_block_size = vllm_config.cache_config.block_size
-        self._block_size = vllm_config.cache_config.block_size
-        if self.pcp_size > 1:
-            self._block_size *= self.pcp_size
-        if self.dcp_size > 1:
-            self._block_size *= self.dcp_size
+        self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
+        cp_scale = self.pcp_size * self.dcp_size
+        self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
+        self._block_size = self.grouped_block_size[0]
+        self.lcm_block_size = math.lcm(*self.grouped_block_size)
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         self._preempted_req_ids: set[str] = set()
@@ -100,6 +100,22 @@ class KVPoolScheduler:
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
         return infer_group_cache_families(kv_cache_groups, self.compress_ratios)
+
+    def _infer_group_block_sizes(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_config: KVCacheConfig | None,
+    ) -> list[int]:
+        if kv_cache_config is None or not self.use_hybrid:
+            return [vllm_config.cache_config.block_size]
+
+        block_sizes: list[int] = []
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+            block_sizes.append(kv_cache_spec.block_size)
+        return block_sizes
 
     @staticmethod
     def _uses_hybrid_kv_cache(vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig | None) -> bool:
@@ -175,11 +191,11 @@ class KVPoolScheduler:
             return 0, False
 
         if self._discard_partial_chunks:
-            token_len = len(request.prompt_token_ids) // self._block_size * self._block_size
+            token_len = len(request.prompt_token_ids) // self.lcm_block_size * self.lcm_block_size
         else:
             token_len = len(request.prompt_token_ids)
 
-        if token_len < self._block_size:
+        if token_len < self.lcm_block_size:
             return 0, False
 
         num_external_hit_tokens = self.client.lookup(
@@ -293,14 +309,14 @@ class KVPoolScheduler:
             )
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
-                (len(request.prompt_token_ids) // self._block_size * self._block_size)
+                (len(request.prompt_token_ids) // self.lcm_block_size * self.lcm_block_size)
                 if self._discard_partial_chunks
                 else len(request.prompt_token_ids)
             )
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
-                self._block_size,
+                self.lcm_block_size,
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 block_hashes=request_real.block_hashes,
@@ -338,13 +354,13 @@ class KVPoolScheduler:
                     )
                     self._request_trackers[req_id] = request_tracker
                     last_chunk_tokens_num = (
-                        (len(request_real.prompt_token_ids) // self._block_size * self._block_size)
+                        (len(request_real.prompt_token_ids) // self.lcm_block_size * self.lcm_block_size)
                         if self._discard_partial_chunks
                         else len(request_real.prompt_token_ids)
                     )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
-                        self._block_size,
+                        self.lcm_block_size,
                         load_spec=load_spec,
                         skip_save=force_skip_save,
                         block_hashes=request_real.block_hashes,
@@ -376,13 +392,13 @@ class KVPoolScheduler:
                     request_tracker.update(new_block_ids)
 
                     last_chunk_tokens_num = (
-                        (len(request.prompt_token_ids) // self._block_size * self._block_size)
+                        (len(request.prompt_token_ids) // self.lcm_block_size * self.lcm_block_size)
                         if self._discard_partial_chunks
                         else len(request.prompt_token_ids)
                     )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
-                        self._block_size,
+                        self.lcm_block_size,
                         load_spec=None,
                         skip_save=force_skip_save,
                         block_hashes=request.block_hashes,
@@ -403,7 +419,7 @@ class KVPoolScheduler:
                 if not load_spec:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
-                if (num_tokens_to_compute % self._block_size != 0) and (
+                if (num_tokens_to_compute % self.lcm_block_size != 0) and (
                     num_tokens_to_compute == len(request.prompt_token_ids) - 1
                 ):
                     num_tokens_to_compute = num_tokens_to_compute + 1
@@ -417,7 +433,7 @@ class KVPoolScheduler:
                 self._request_trackers[request_id] = request_tracker
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
-                    self._block_size,
+                    self.lcm_block_size,
                     load_spec=load_spec,
                     skip_save=None,
                     block_hashes=request.block_hashes,
