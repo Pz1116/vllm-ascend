@@ -139,7 +139,7 @@ void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
     char* dst_ptr = static_cast<char*>(dst.data_ptr());
 
     const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
-    
+
     const int64_t num_blocks = block_mapping.size(0);
     const int64_t max_src_block = src.size(0);
     const int64_t max_dst_block = dst.size(0);
@@ -150,7 +150,7 @@ void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
                     "src block index ", src_block_number, " out of range (max: ", max_src_block, ")");
         TORCH_CHECK(dst_block_number >= 0 && dst_block_number <= max_dst_block,
                     "dst block index ", dst_block_number, " out of range (max: ", max_dst_block, ")");
-        
+
         int64_t src_offset = src_block_number * block_size_in_bytes;
         int64_t dst_offset = dst_block_number * block_size_in_bytes;
 
@@ -161,13 +161,13 @@ void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
 }
 
 void swap_blocks(torch::Tensor &x, torch::Tensor &y, const torch::Tensor &z)
-{    
-  
+{
+
     const c10_npu::OptionalNPUGuard npuGuard(
         (!x.device().is_cpu()) ? x.device() : y.device()
     );
-    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();                       
-    swap_blocks_impl(x, y, z, stream);           
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    swap_blocks_impl(x, y, z, stream);
     return;
 }
 
@@ -511,7 +511,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> dispatch_prefill(
 
     EXEC_NPU_CMD(aclnnNotifyDispatch,
         send_data,
-        num_tokens_per_expert, 
+        num_tokens_per_expert,
         send_count,
         num_tokens,
         group_ep_ptr,  // commGroup
@@ -774,7 +774,7 @@ at::Tensor npu_causal_conv1d_custom(
 
     return output;
 }
-  
+
 // It is expected that further improvements will be made after it is incorporated into CANN on June 30th.
 std::vector<at::Tensor> moe_grouped_matmul(
     at::Tensor x,
@@ -1705,10 +1705,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     //batch_matmul ops refer to sgl-kernel-npu
     ops.def(
-            "batch_matmul_transpose(Tensor tensor_a, Tensor tensor_b, Tensor tensor_c, str? format_mode=None, str? quant_mode=None) -> ()");    
+            "batch_matmul_transpose(Tensor tensor_a, Tensor tensor_b, Tensor tensor_c, str? format_mode=None, str? quant_mode=None) -> ()");
     ops.impl("batch_matmul_transpose", torch::kPrivateUse1, &vllm_ascend::batch_matmul_transpose);
 
-    ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
+    ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 
     ops.def("device_print(str msg) -> ()");
@@ -1803,7 +1803,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "num_ranks) -> Tensor");
     ops.impl("combine_prefill", torch::kPrivateUse1,
              &vllm_ascend::combine_prefill);
-    
+
     ops.def(
         "npu_moe_init_routing_custom(Tensor x, Tensor expert_idx, *, Tensor? scale=None, Tensor? offset=None, int active_num=-1, "
         "                            int expert_capacity=-1, int expert_num=-1, int drop_pad_mode=0, int expert_tokens_num_type=0, "
@@ -1824,7 +1824,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
                             "float routed_scaling_factor, "
                             "float eps,"
                             "Tensor? bias_opt=None)"
-                            
+
         "-> (Tensor y ,Tensor expert_idx, Tensor out)"
         );
     ops.impl("moe_gating_top_k", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k);
@@ -2113,4 +2113,5 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_scatter_nd_update_v2", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_v2);
 }
+#endif
 #endif
