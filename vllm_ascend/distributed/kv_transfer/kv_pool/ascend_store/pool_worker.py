@@ -19,10 +19,13 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, UniformTypeKVCa
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     AscendConnectorMetadata,
+    CacheGroupLayout,
+    CacheLayout,
     ChunkedTokenDatabase,
     KeyMetadata,
     LayerMultiBlockReqMeta,
     ReqMeta,
+    infer_group_cache_families,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
@@ -64,6 +67,13 @@ class KVPoolWorker:
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
         self.use_sparse = hasattr(model_config.hf_text_config, "index_topk")
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        hf_config = getattr(model_config, "hf_config", hf_text_config)
+        self.model_type = getattr(hf_text_config, "model_type", None) or getattr(hf_config, "model_type", None)
+        self.compress_ratios = getattr(hf_text_config, "compress_ratios", None)
+        if self.compress_ratios is None:
+            self.compress_ratios = getattr(hf_config, "compress_ratios", None)
+        self.use_compress = self.compress_ratios is not None
         self.use_layerwise = use_layerwize
         self.kv_cache_config = kv_cache_config
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -92,7 +102,7 @@ class KVPoolWorker:
         self.current_layer = 0
         self.num_layers = model_config.get_num_layers(parallel_config)
 
-        if self.use_mla:
+        if self.use_mla or self.use_sparse:
             self.num_kv_head = 1
         else:
             self.num_kv_head = model_config.get_total_num_kv_heads()
@@ -113,6 +123,8 @@ class KVPoolWorker:
         )
         self.num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups) if self.kv_cache_config is not None else 1
         self.group_uses_align_state = [False] * self.num_kv_cache_groups
+        self.state_group_uses_align_state: list[bool] = []
+        self.state_group_ids: list[int] = []
         if self.kv_cache_config is not None:
             for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
                 kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -176,24 +188,87 @@ class KVPoolWorker:
 
         self.finished_store_req: set[str] = set()
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def _infer_group_families(self) -> list[str]:
+        kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
+        return infer_group_cache_families(kv_cache_groups, self.compress_ratios)
+
+    def _build_cache_layout(
+        self,
+        kv_states: dict[str, torch.Tensor] | None,
+        kv_layout: CacheLayout | None,
+    ) -> CacheLayout:
+        if kv_layout is not None:
+            return kv_layout
+
+        if self.kv_cache_config is None:
+            kv_groups = [CacheGroupLayout(group_id=0, layer_names=[])]
+        else:
+            group_families = self._infer_group_families()
+            kv_groups = [
+                CacheGroupLayout(
+                    group_id=group_id,
+                    layer_names=list(group_spec.layer_names),
+                    cache_role="kv",
+                    cache_family=group_families[group_id],
+                    skip_null_blocks=self.group_uses_align_state[group_id],
+                )
+                for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups)
+            ]
+
+        state_groups: list[CacheGroupLayout] = []
+        if kv_states:
+            if kv_groups:
+                for group in kv_groups:
+                    state_groups.append(
+                        CacheGroupLayout(
+                            group_id=group.group_id,
+                            layer_names=list(group.layer_names),
+                            cache_role="state",
+                            cache_family=group.cache_family,
+                            skip_null_blocks=group.skip_null_blocks,
+                        )
+                    )
+            else:
+                state_groups = [CacheGroupLayout(group_id=0, layer_names=list(kv_states), cache_role="state")]
+        return CacheLayout(kv_groups=kv_groups, state_groups=state_groups)
+
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        kv_states: dict[str, torch.Tensor] | None = None,
+        kv_layout: CacheLayout | None = None,
+    ):
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
+        if not isinstance(first_kv_cache_tuple, (list, tuple)):
+            first_kv_cache_tuple = (first_kv_cache_tuple,)
         first_kv_cache = first_kv_cache_tuple[0]
 
-        self.num_blocks = first_kv_cache.shape[0]
+        self.num_blocks = (
+            self.kv_cache_config.num_blocks if self.kv_cache_config is not None else first_kv_cache.shape[0]
+        )
         logger.info("num_blocks: %s", self.num_blocks)
         block_rank = 3
         self.block_len = []
+        self.block_size_scale = []
         if self.use_mla or self.use_sparse:
             for i in range(len(first_kv_cache_tuple)):
                 block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
                 logger.info("block_shape: %s", block_shape)
-                self.block_len.append(first_kv_cache[i].element_size() * math.prod(block_shape))
+                self.block_len.append(first_kv_cache_tuple[i].element_size() * math.prod(block_shape))
+                tensor_num_blocks = first_kv_cache_tuple[i].shape[0]
+                assert tensor_num_blocks % self.num_blocks == 0, (
+                    "The external block size must be an integer multiple of the kernel block size."
+                )
+                self.block_size_scale.append(tensor_num_blocks // self.num_blocks)
         else:
             # [num_block, block_size, num_head, hidden_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
             logger.info("block_shape: %s", block_shape)
             self.block_len = [first_kv_cache.element_size() * math.prod(block_shape)]
+            assert first_kv_cache.shape[0] % self.num_blocks == 0, (
+                "The external block size must be an integer multiple of the kernel block size."
+            )
+            self.block_size_scale = [first_kv_cache.shape[0] // self.num_blocks]
 
         logger.info(
             "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
@@ -203,39 +278,125 @@ class KVPoolWorker:
         )
 
         self.kv_caches = kv_caches
+        self.kv_states = kv_states or {}
+        self.cache_layout = self._build_cache_layout(self.kv_states, kv_layout)
         self.kv_caches_base_addr = []
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
+        self.group_kv_block_size_scale: dict[int, list[int]] = {}
+        self.group_kv_cache_families: dict[int, str] = {
+            group.group_id: group.cache_family for group in self.cache_layout.kv_groups
+        }
+        self.group_state_caches_base_addr: dict[int, list[int]] = {}
+        self.group_state_block_len: dict[int, list[int]] = {}
+        self.group_state_block_size_scale: dict[int, list[int]] = {}
+        self.group_state_cache_families: dict[int, str] = {
+            group.group_id: group.cache_family for group in self.cache_layout.state_groups
+        }
+        self.state_group_ids = [group.group_id for group in self.cache_layout.state_groups]
+        self.state_group_uses_align_state = [False] * (max(self.state_group_ids) + 1) if self.state_group_ids else []
         ptrs = []
         lengths = []
-        for cache_or_caches in kv_caches.values():
+        seen_ptrs: set[int] = set()
+        for layer_name, cache_or_caches in kv_caches.items():
+            if not isinstance(cache_or_caches, (list, tuple)):
+                cache_or_caches = (cache_or_caches,)
             # Normalize to always be a list of caches
-            for i, cache in enumerate(cache_or_caches, 0):
+            for cache in cache_or_caches:
                 base_addr = cache.data_ptr()
                 block_len = cache[0].numel() * cache.element_size()
-                region_len = self.num_blocks * block_len
+                tensor_num_blocks = cache.shape[0]
+                assert tensor_num_blocks % self.num_blocks == 0, (
+                    "The external block size must be an integer multiple of the kernel block size."
+                )
+                block_size_scale = tensor_num_blocks // self.num_blocks
+                region_len = tensor_num_blocks * block_len
                 self.kv_caches_base_addr.append(base_addr)
-                ptrs.append(base_addr)
-                lengths.append(region_len)
+                if base_addr not in seen_ptrs:
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
+                    seen_ptrs.add(base_addr)
 
-        if self.kv_cache_config is not None:
-            for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
+        if self.cache_layout.kv_groups:
+            for group_spec in self.cache_layout.kv_groups:
+                group_id = group_spec.group_id
                 group_addrs: list[int] = []
                 group_block_lens: list[int] = []
+                group_block_size_scales: list[int] = []
+                seen_group_ptrs: set[int] = set()
                 for layer_name in group_spec.layer_names:
                     cache_or_caches = kv_caches[layer_name]
+                    if not isinstance(cache_or_caches, (list, tuple)):
+                        cache_or_caches = (cache_or_caches,)
                     for cache in cache_or_caches:
-                        group_addrs.append(cache.data_ptr())
-                        group_block_lens.append(cache[0].numel() * cache.element_size())
+                        base_addr = cache.data_ptr()
+                        if base_addr in seen_group_ptrs:
+                            continue
+                        group_addrs.append(base_addr)
+                        block_len = cache[0].numel() * cache.element_size()
+                        tensor_num_blocks = cache.shape[0]
+                        assert tensor_num_blocks % self.num_blocks == 0, (
+                            "The external block size must be an integer multiple of the kernel block size."
+                        )
+                        group_block_lens.append(block_len)
+                        group_block_size_scales.append(tensor_num_blocks // self.num_blocks)
+                        seen_group_ptrs.add(base_addr)
                 self.group_kv_caches_base_addr[group_id] = group_addrs
                 self.group_block_len[group_id] = group_block_lens
+                self.group_kv_block_size_scale[group_id] = group_block_size_scales
+
+        for group_spec in self.cache_layout.state_groups:
+            group_id = group_spec.group_id
+            group_addrs: list[int] = []
+            group_block_lens: list[int] = []
+            group_block_size_scales: list[int] = []
+            seen_group_ptrs: set[int] = set()
+            for layer_name in group_spec.layer_names:
+                cache_or_caches = self.kv_states.get(layer_name, ())
+                if isinstance(cache_or_caches, torch.Tensor):
+                    cache_or_caches = (cache_or_caches,)
+                for cache in cache_or_caches:
+                    base_addr = cache.data_ptr()
+                    if base_addr in seen_group_ptrs:
+                        continue
+                    block_len = cache[0].numel() * cache.element_size()
+                    tensor_num_blocks = cache.shape[0]
+                    assert tensor_num_blocks % self.num_blocks == 0, (
+                        "The external block size must be an integer multiple of the kernel block size."
+                    )
+                    block_size_scale = tensor_num_blocks // self.num_blocks
+                    region_len = tensor_num_blocks * block_len
+                    group_addrs.append(base_addr)
+                    group_block_lens.append(block_len)
+                    group_block_size_scales.append(block_size_scale)
+                    if base_addr not in seen_ptrs:
+                        ptrs.append(base_addr)
+                        lengths.append(region_len)
+                        seen_ptrs.add(base_addr)
+                    seen_group_ptrs.add(base_addr)
+            self.group_state_caches_base_addr[group_id] = group_addrs
+            self.group_state_block_len[group_id] = group_block_lens
+            self.group_state_block_size_scale[group_id] = group_block_size_scales
+            if group_spec.skip_null_blocks and group_id < len(self.state_group_uses_align_state):
+                self.state_group_uses_align_state[group_id] = True
 
         self.m_store.register_buffer(ptrs, lengths)
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
         self.token_database.set_block_len(self.block_len)
+        self.token_database.set_block_size_scale(self.block_size_scale)
         self.token_database.set_group_buffers(
             self.group_kv_caches_base_addr,
             self.group_block_len,
+            self.group_kv_block_size_scale,
+            cache_role="kv",
+            group_cache_families=self.group_kv_cache_families,
+        )
+        self.token_database.set_group_buffers(
+            self.group_state_caches_base_addr,
+            self.group_state_block_len,
+            self.group_state_block_size_scale,
+            cache_role="state",
+            group_cache_families=self.group_state_cache_families,
         )
 
         if self.use_layerwise:
@@ -294,6 +455,7 @@ class KVPoolWorker:
         self.layerwise_retrievers = []
         for request in metadata.requests:
             request.skip_null_blocks_by_group = self.group_uses_align_state
+            request.skip_null_state_blocks_by_group = self.state_group_uses_align_state
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:  # load =0
                 continue
@@ -319,25 +481,44 @@ class KVPoolWorker:
                     size_list = []
                     key_list = []
                     mask_num = request.load_spec.vllm_cached_tokens // self.block_size * self.block_size
-                    for group_id in request.kv_cache_group_ids or [0]:
-                        block_ids = request.block_ids_by_group[group_id]
-                        for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
-                            token_len,
-                            request.block_hashes,
-                            block_ids,
-                            mask_num,
-                            kv_cache_group_id=group_id,
-                            skip_null_blocks=self.group_uses_align_state[group_id],
-                        ):
-                            addr, size, _ = self.token_database.prepare_value(
-                                start,
-                                end,
+                    for cache_role, group_ids, block_ids_by_group, skip_null_blocks in (
+                        (
+                            "kv",
+                            request.kv_cache_group_ids or [0],
+                            request.block_ids_by_group,
+                            self.group_uses_align_state,
+                        ),
+                        (
+                            "state",
+                            request.state_group_ids or [],
+                            request.state_block_ids_by_group or [],
+                            self.state_group_uses_align_state,
+                        ),
+                    ):
+                        for group_id in group_ids:
+                            block_ids = block_ids_by_group[group_id]
+                            skip_null = group_id < len(skip_null_blocks) and skip_null_blocks[group_id]
+                            for start, end, key, _ in self.token_database.process_tokens_with_block_ids(
+                                token_len,
+                                request.block_hashes,
                                 block_ids,
+                                mask_num,
                                 kv_cache_group_id=group_id,
-                            )
-                            key_list.append(key.to_string())
-                            addr_list.append(addr)
-                            size_list.append(size)
+                                skip_null_blocks=skip_null,
+                                cache_role=cache_role,
+                            ):
+                                addr, size, _ = self.token_database.prepare_value(
+                                    start,
+                                    end,
+                                    block_ids,
+                                    kv_cache_group_id=group_id,
+                                    cache_role=cache_role,
+                                )
+                                key_list.append(key.to_string())
+                                addr_list.append(addr)
+                                size_list.append(size)
+                    if not key_list:
+                        continue
                     key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
                     addr_list_c = (
                         addr_list[self.tp_rank % len(addr_list) :] + addr_list[: self.tp_rank % len(addr_list)]
@@ -398,6 +579,7 @@ class KVPoolWorker:
                 continue
 
             request.skip_null_blocks_by_group = self.group_uses_align_state
+            request.skip_null_state_blocks_by_group = self.state_group_uses_align_state
             request.current_event = current_event
             self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
                 request.req_id
@@ -600,6 +782,7 @@ class KVPoolWorker:
         token_len: int,
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int],
+        state_group_ids: list[int] | None,
         use_layerwise: bool,
     ) -> int:
         """
@@ -609,7 +792,13 @@ class KVPoolWorker:
         """
         try:
             hits = []
-            for group_id in kv_cache_group_ids:
+            cache_specs: list[tuple[str, int, list[bool]]] = [
+                ("kv", group_id, self.group_uses_align_state) for group_id in kv_cache_group_ids
+            ]
+            cache_specs.extend(
+                ("state", group_id, self.state_group_uses_align_state) for group_id in (state_group_ids or [])
+            )
+            for cache_role, group_id, skip_null_groups in cache_specs:
                 end = 0
                 keys = []
                 starts = []
@@ -618,6 +807,7 @@ class KVPoolWorker:
                     token_len,
                     block_hashes,
                     kv_cache_group_id=group_id,
+                    cache_role=cache_role,
                 ):
                     if use_layerwise:
                         keys_multi_layer = key.split_layers(self.num_layers)
@@ -636,7 +826,7 @@ class KVPoolWorker:
 
                 if use_layerwise:
                     res = self.check_all_layers_exists(res, self.num_layers)
-                if self.group_uses_align_state[group_id]:
+                if group_id < len(skip_null_groups) and skip_null_groups[group_id]:
                     hit_end = 0
                     for index, value in enumerate(res):  # type: ignore[arg-type]
                         if value != 1:
@@ -654,11 +844,19 @@ class KVPoolWorker:
             return 0
         return min(hits) if hits else 0
 
+    def _get_group_num_kv_heads(self, group_id: int, cache_role: str) -> int:
+        if cache_role == "state" or self.use_mla or self.use_sparse:
+            return 1
+        if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
+            return 1
+        return self.num_kv_head
+
     def lookup_scheduler(
         self,
         token_len: int,
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int],
+        state_group_ids: list[int] | None,
         use_layerwise: bool,
     ) -> int:
         """
@@ -668,7 +866,13 @@ class KVPoolWorker:
         """
         try:
             hits = []
-            for group_id in kv_cache_group_ids:
+            cache_specs: list[tuple[str, int, list[bool]]] = [
+                ("kv", group_id, self.group_uses_align_state) for group_id in kv_cache_group_ids
+            ]
+            cache_specs.extend(
+                ("state", group_id, self.state_group_uses_align_state) for group_id in (state_group_ids or [])
+            )
+            for cache_role, group_id, skip_null_groups in cache_specs:
                 end = 0
                 keys = []
                 starts = []
@@ -677,6 +881,7 @@ class KVPoolWorker:
                     token_len,
                     block_hashes,
                     kv_cache_group_id=group_id,
+                    cache_role=cache_role,
                 ):
                     if use_layerwise:
                         keys_multi_layer = key.split_layers(self.num_layers)
@@ -692,7 +897,9 @@ class KVPoolWorker:
                     continue
 
                 multi_tp_keys = keys[:]
-                for i in range(1, min(self.tp_size, self.num_kv_head)):
+                group_num_kv_head = self._get_group_num_kv_heads(group_id, cache_role)
+                group_tp_size = min(self.tp_size, group_num_kv_head)
+                for i in range(1, group_tp_size):
                     for item in keys:
                         new_str = item.replace(  # type: ignore[attr-defined]
                             "@head_or_tp_rank:0", f"@head_or_tp_rank:{i}", 1
@@ -714,9 +921,9 @@ class KVPoolWorker:
                     num_block = len(keys) // self.num_layers
                 multi_tp_values = [
                     res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
-                    for i in range(min(self.tp_size, self.num_kv_head) * self.pp_size)
+                    for i in range(group_tp_size * self.pp_size)
                 ]
-                if self.group_uses_align_state[group_id]:
+                if group_id < len(skip_null_groups) and skip_null_groups[group_id]:
                     exists_by_block = [all(values[idx] == 1 for values in multi_tp_values) for idx in range(num_block)]
                     hit_end = 0
                     for index, exists in enumerate(exists_by_block):

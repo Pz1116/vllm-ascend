@@ -88,7 +88,7 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, extract_layer_index
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
@@ -102,6 +102,11 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+    CacheGroupLayout,
+    CacheLayout,
+    infer_group_cache_families,
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
@@ -2875,6 +2880,8 @@ class NPUModelRunner(GPUModelRunner):
 
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+        kv_states = self.initialize_kv_state()
+        kv_layout = self.build_kv_transfer_layout(kv_cache_config, kv_states)
         # TODO: refactor the logic of attention
         # Initialize drafter attention group initialization
         if self.speculative_config and (
@@ -2886,7 +2893,12 @@ class NPUModelRunner(GPUModelRunner):
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(kv_caches)
+            register_kwargs: dict[str, Any] = {}
+            if kv_states:
+                register_kwargs["kv_states"] = kv_states
+            if kv_layout is not None:
+                register_kwargs["kv_layout"] = kv_layout
+            get_kv_transfer_group().register_kv_caches(kv_caches, **register_kwargs)
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
@@ -2896,6 +2908,120 @@ class NPUModelRunner(GPUModelRunner):
         aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
         offset = (aligned_addr - data_ptr) // tensor.element_size()
         return tensor[int(offset) :]
+
+    def _get_hf_model_attr(self, name: str, default: Any = None) -> Any:
+        hf_text_config = getattr(self.model_config, "hf_text_config", None)
+        if hf_text_config is not None and hasattr(hf_text_config, name):
+            return getattr(hf_text_config, name)
+        hf_config = getattr(self.model_config, "hf_config", None)
+        return getattr(hf_config, name, default)
+
+    def initialize_kv_state(self) -> dict[str, tuple[torch.Tensor, ...]] | None:
+        if self._get_hf_model_attr("model_type") != "deepseek_v4" or self.kv_cache_config is None:
+            return None
+
+        compress_ratios = self._get_hf_model_attr("compress_ratios")
+        if compress_ratios is None:
+            return None
+
+        block_size = self.vllm_config.cache_config.block_size
+        block_num = self.kv_cache_config.num_blocks
+        head_dim = self._get_hf_model_attr("head_dim")
+        indexer_head_dim = self._get_hf_model_attr("index_head_dim")
+        alignment = 2 * 1024 * 1024
+
+        def _get_aligned_tensor(size: torch.Size, dtype: torch.dtype) -> torch.Tensor:
+            tensor_size = size.numel() * dtype.itemsize
+            original_tensor = torch.zeros(tensor_size + alignment, dtype=torch.int8, device=self.device)
+            aligned_tensor = self._align_memory(original_tensor, alignment)[:tensor_size]
+            return aligned_tensor.view(dtype).view(size)
+
+        kv_states: dict[str, tuple[torch.Tensor, ...]] = {}
+        for group in self.kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                layer_index = extract_layer_index(layer_name)
+                compress_ratio = compress_ratios[layer_index]
+                sliding_window = _get_aligned_tensor(
+                    torch.Size([block_num, block_size, head_dim]),
+                    torch.bfloat16,
+                )
+                if compress_ratio == 4:
+                    coeff = 2
+                    kv_states[layer_name] = (
+                        sliding_window,
+                        _get_aligned_tensor(
+                            torch.Size([block_num, block_size, coeff * head_dim]),
+                            torch.float32,
+                        ),
+                        _get_aligned_tensor(
+                            torch.Size([block_num, block_size, coeff * head_dim]),
+                            torch.float32,
+                        ),
+                        _get_aligned_tensor(
+                            torch.Size([block_num, block_size, coeff * indexer_head_dim]),
+                            torch.float32,
+                        ),
+                        _get_aligned_tensor(
+                            torch.Size([block_num, block_size, coeff * indexer_head_dim]),
+                            torch.float32,
+                        ),
+                    )
+                elif compress_ratio == 128:
+                    kv_states[layer_name] = (
+                        sliding_window,
+                        _get_aligned_tensor(
+                            torch.Size([block_num, block_size, head_dim]),
+                            torch.float32,
+                        ),
+                        _get_aligned_tensor(
+                            torch.Size([block_num, block_size, head_dim]),
+                            torch.float32,
+                        ),
+                    )
+                else:
+                    kv_states[layer_name] = (sliding_window,)
+        return kv_states
+
+    def build_kv_transfer_layout(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_states: dict[str, tuple[torch.Tensor, ...]] | None,
+    ) -> CacheLayout | None:
+        if self._get_hf_model_attr("model_type") != "deepseek_v4":
+            return None
+
+        compress_ratios = self._get_hf_model_attr("compress_ratios")
+        families = infer_group_cache_families(kv_cache_config.kv_cache_groups, compress_ratios)
+        kv_groups = [
+            CacheGroupLayout(
+                group_id=group_id,
+                layer_names=list(group.layer_names),
+                cache_role="kv",
+                cache_family=families[group_id],
+            )
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        ]
+
+        state_groups: list[CacheGroupLayout] = []
+        if kv_states:
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+                state_layer_names = [layer_name for layer_name in group.layer_names if layer_name in kv_states]
+                if not state_layer_names:
+                    continue
+                assert state_layer_names == list(group.layer_names), (
+                    f"DeepSeek-V4 state layout must cover all layers in group {group_id}, "
+                    f"got state layers {state_layer_names} for group layers {group.layer_names}"
+                )
+                state_groups.append(
+                    CacheGroupLayout(
+                        group_id=group_id,
+                        layer_names=state_layer_names,
+                        cache_role="state",
+                        cache_family=families[group_id],
+                    )
+                )
+
+        return CacheLayout(kv_groups=kv_groups, state_groups=state_groups)
 
     def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """

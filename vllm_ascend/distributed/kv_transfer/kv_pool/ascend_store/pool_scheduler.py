@@ -5,11 +5,18 @@ import zmq
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    MambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
@@ -18,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LoadSpec,
     ReqMeta,
     RequestTracker,
+    infer_group_cache_families,
     normalize_block_ids_by_group,
 )
 
@@ -31,9 +39,22 @@ class KVPoolScheduler:
     ):
         self.use_layerwise = use_layerwise
         self.kv_cache_config = kv_cache_config
+        hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        hf_config = getattr(vllm_config.model_config, "hf_config", hf_text_config)
+        self.model_type = getattr(hf_text_config, "model_type", None) or getattr(hf_config, "model_type", None)
+        self.compress_ratios = getattr(hf_text_config, "compress_ratios", None)
+        if self.compress_ratios is None:
+            self.compress_ratios = getattr(hf_config, "compress_ratios", None)
+        self.use_compress = self.compress_ratios is not None
         self.kv_cache_group_ids = (
             list(range(len(kv_cache_config.kv_cache_groups))) if kv_cache_config is not None else [0]
         )
+        self.kv_cache_group_families = self._infer_group_families()
+        self.state_group_ids = self.kv_cache_group_ids.copy() if self._requires_state_groups() else []
+        self.state_cache_group_families = self.kv_cache_group_families.copy() if self.state_group_ids else []
+        self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
+        self.need_truncate = self.use_compress
+        self.num_swa_blocks = self._infer_swa_blocks()
         if kv_cache_config is not None:
             for kv_cache_group in kv_cache_config.kv_cache_groups:
                 kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -75,6 +96,63 @@ class KVPoolScheduler:
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
+    def _infer_group_families(self) -> list[str]:
+        kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
+        return infer_group_cache_families(kv_cache_groups, self.compress_ratios)
+
+    @staticmethod
+    def _uses_hybrid_kv_cache(vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig | None) -> bool:
+        if kv_cache_config is None:
+            return False
+        if getattr(vllm_config.scheduler_config, "disable_hybrid_kv_cache_manager", False):
+            return False
+        return len(kv_cache_config.kv_cache_groups) > 1 and any(
+            not isinstance(group.kv_cache_spec, FullAttentionSpec) for group in kv_cache_config.kv_cache_groups
+        )
+
+    def _infer_swa_blocks(self) -> list[int]:
+        if self.kv_cache_config is None:
+            return []
+
+        num_swa_blocks: list[int] = []
+        for group in self.kv_cache_config.kv_cache_groups:
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                group_specs = []
+                for layer_name in group.layer_names:
+                    layer_spec = kv_cache_spec.kv_cache_specs[layer_name]
+                    if layer_spec not in group_specs:
+                        group_specs.append(layer_spec)
+            else:
+                group_specs = [kv_cache_spec]
+
+            first_spec = group_specs[0]
+            if isinstance(first_spec, SlidingWindowSpec):
+                num_swa_blocks.append(cdiv(first_spec.sliding_window, first_spec.block_size) + 1)
+            else:
+                num_swa_blocks.append(0)
+            if any(isinstance(spec, MambaSpec) for spec in group_specs):
+                self.need_truncate = True
+        return num_swa_blocks
+
+    def get_sw_clipped_blocks(
+        self,
+        block_ids: tuple[list[int], ...] | list[list[int]],
+    ) -> tuple[list[int], ...] | list[list[int]]:
+        if len(block_ids) == 0 or not self.use_hybrid:
+            return block_ids
+        assert len(block_ids) == len(self.num_swa_blocks), "Number of KV cache groups must match"
+        clipped = [
+            blocks[-self.num_swa_blocks[group_id] :] if self.num_swa_blocks[group_id] > 0 else blocks
+            for group_id, blocks in enumerate(block_ids)
+        ]
+        return tuple(clipped) if isinstance(block_ids, tuple) else clipped
+
+    def _requires_state_groups(self) -> bool:
+        # DSV4 decompression state uses the explicit state path. Mamba align
+        # state lives in kv_caches and is transferred through KV groups.
+        return self.model_type == "deepseek_v4" and self.use_compress
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -107,6 +185,7 @@ class KVPoolScheduler:
             token_len,
             request.block_hashes,
             self.kv_cache_group_ids,
+            self.state_group_ids,
         )
 
         if num_external_hit_tokens == request.num_tokens:
@@ -227,6 +306,9 @@ class KVPoolScheduler:
                 is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
                 discard_partial_chunks=self._discard_partial_chunks,
                 original_block_size=self.original_block_size,
+                kv_cache_group_families=self.kv_cache_group_families,
+                state_group_ids=self.state_group_ids,
+                state_cache_group_families=self.state_cache_group_families,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -268,6 +350,9 @@ class KVPoolScheduler:
                         is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
                         discard_partial_chunks=self._discard_partial_chunks,
                         original_block_size=self.original_block_size,
+                        kv_cache_group_families=self.kv_cache_group_families,
+                        state_group_ids=self.state_group_ids,
+                        state_cache_group_families=self.state_cache_group_families,
                     )
 
                 # decode/chunked request
@@ -303,6 +388,9 @@ class KVPoolScheduler:
                         is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
                         discard_partial_chunks=self._discard_partial_chunks,
                         original_block_size=self.original_block_size,
+                        kv_cache_group_families=self.kv_cache_group_families,
+                        state_group_ids=self.state_group_ids,
+                        state_cache_group_families=self.state_cache_group_families,
                     )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -333,6 +421,9 @@ class KVPoolScheduler:
                     skip_save=None,
                     block_hashes=request.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
+                    kv_cache_group_families=self.kv_cache_group_families,
+                    state_group_ids=self.state_group_ids,
+                    state_cache_group_families=self.state_cache_group_families,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -374,11 +465,13 @@ class KVPoolScheduler:
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
-        delay_free_blocks = any(len(group_block_ids) > 0 for group_block_ids in block_ids)
+        block_ids = self.get_sw_clipped_blocks(block_ids)
+        valid_group_block_ids = [group_block_ids for group_block_ids in block_ids if group_block_ids]
+        delay_free_blocks = bool(valid_group_block_ids)
         if delay_free_blocks:
             logger.debug(
                 "Delaying free of %d KV cache groups for request %s",
-                sum(1 for group_block_ids in block_ids if group_block_ids),
+                len(valid_group_block_ids),
                 request.request_id,
             )
         return delay_free_blocks, None
@@ -401,12 +494,14 @@ class LookupKeyClient:
         token_len: int,
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int],
+        state_group_ids: list[int],
     ) -> int:
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
-        group_frames = self.encoder.encode(kv_cache_group_ids)
+        kv_group_frames = self.encoder.encode(kv_cache_group_ids)
+        state_group_frames = self.encoder.encode(state_group_ids)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
-        all_frames = [token_len_bytes] + list(group_frames) + list(hash_frames)
+        all_frames = [token_len_bytes] + list(kv_group_frames) + list(state_group_frames) + list(hash_frames)
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")

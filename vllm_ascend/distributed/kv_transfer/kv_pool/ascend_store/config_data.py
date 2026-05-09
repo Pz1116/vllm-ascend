@@ -1,7 +1,8 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Optional, cast
 
+import regex as re
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
@@ -26,6 +27,10 @@ class KeyMetadata:
     pp_rank: int
     """ Initialize the current kv cache group id """
     kv_cache_group_id: int = 0
+    """ Differentiate kv/state keys that share the same chunk hash """
+    cache_role: str = "kv"
+    """ Family name for compress-aware hybrid cache layouts """
+    cache_family: str = "default"
 
 
 @dataclass(order=True)
@@ -42,6 +47,8 @@ class PoolKey:
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
                 self.key_metadata.kv_cache_group_id,
+                self.key_metadata.cache_role,
+                self.key_metadata.cache_family,
                 self.chunk_hash,
             )
         )
@@ -52,7 +59,10 @@ class PoolKey:
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
             f"@pp_rank:{self.key_metadata.pp_rank}"
-            f"@group:{self.key_metadata.kv_cache_group_id}@{self.chunk_hash}"
+            f"@group:{self.key_metadata.kv_cache_group_id}"
+            f"@cache_role:{self.key_metadata.cache_role}"
+            f"@cache_family:{self.key_metadata.cache_family}"
+            f"@{self.chunk_hash}"
         )
 
     def split_layers(self, num_layers: int) -> list["LayerPoolKey"]:
@@ -83,6 +93,8 @@ class LayerPoolKey(PoolKey):
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.kv_cache_group_id,
+                self.key_metadata.cache_role,
+                self.key_metadata.cache_family,
                 self.chunk_hash,
                 self.layer_id,
             )
@@ -93,8 +105,62 @@ class LayerPoolKey(PoolKey):
             f"{self.key_metadata.model_name}"
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
-            f"@group:{self.key_metadata.kv_cache_group_id}@{self.chunk_hash}@{self.layer_id}"
+            f"@group:{self.key_metadata.kv_cache_group_id}"
+            f"@cache_role:{self.key_metadata.cache_role}"
+            f"@cache_family:{self.key_metadata.cache_family}"
+            f"@{self.chunk_hash}@{self.layer_id}"
         )
+
+
+@dataclass
+class CacheGroupLayout:
+    group_id: int
+    layer_names: list[str]
+    cache_role: str = "kv"
+    cache_family: str = "default"
+    skip_null_blocks: bool = False
+
+
+@dataclass
+class CacheLayout:
+    kv_groups: list[CacheGroupLayout]
+    state_groups: list[CacheGroupLayout]
+
+
+def extract_layer_idx(layer_name: str) -> int:
+    match = re.search(r"\.(\d+)\.", layer_name)
+    if match is None:
+        raise ValueError(f"Can not find layer_idx in layer name: {layer_name}")
+    return int(match.group(1))
+
+
+def infer_cache_family_from_ratio(compress_ratio: int | None) -> str:
+    if compress_ratio is None:
+        return "default"
+    return f"c{compress_ratio}"
+
+
+def infer_group_cache_families(
+    kv_cache_groups: Sequence[object] | None,
+    compress_ratios: Sequence[int] | None,
+) -> list[str]:
+    if kv_cache_groups is None:
+        return ["default"]
+
+    families: list[str] = []
+    for group in kv_cache_groups:
+        layer_names = list(getattr(group, "layer_names", []))
+        if compress_ratios is None or not layer_names:
+            families.append("default")
+            continue
+
+        group_ratios = {compress_ratios[extract_layer_idx(layer_name)] for layer_name in layer_names}
+        assert len(group_ratios) == 1, (
+            f"All layers in one KV cache group must share the same compress ratio, "
+            f"got {sorted(group_ratios)} for layers {layer_names}"
+        )
+        families.append(infer_cache_family_from_ratio(next(iter(group_ratios))))
+    return families
 
 
 class ChunkedTokenDatabase:
@@ -103,12 +169,30 @@ class ChunkedTokenDatabase:
         self.block_size = block_size
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        self.block_size_scale: list[int] = []
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
+        self.group_kv_block_size_scale: dict[int, list[int]] = {}
+        self.group_state_caches_base_addr: dict[int, list[int]] = {}
+        self.group_state_block_len: dict[int, list[int]] = {}
+        self.group_state_block_size_scale: dict[int, list[int]] = {}
+        self.group_cache_families: dict[str, dict[int, str]] = {
+            "kv": {},
+            "state": {},
+        }
         self.partitions = partitions
 
-    def _make_key_by_hash(self, chunk_hash: str, kv_cache_group_id: int = 0, layer_id: int | None = None):
+    def _make_key_by_hash(
+        self,
+        chunk_hash: str,
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        cache_family: str | None = None,
+        layer_id: int | None = None,
+    ):
         assert self.metadata is not None
+        if cache_family is None:
+            cache_family = self.group_cache_families.get(cache_role, {}).get(kv_cache_group_id, "default")
         return PoolKey(
             KeyMetadata(
                 model_name=self.metadata.model_name,
@@ -117,6 +201,8 @@ class ChunkedTokenDatabase:
                 dcp_rank=self.metadata.dcp_rank,
                 pp_rank=self.metadata.pp_rank,
                 kv_cache_group_id=kv_cache_group_id,
+                cache_role=cache_role,
+                cache_family=cache_family,
             ),
             chunk_hash,
         )
@@ -127,13 +213,40 @@ class ChunkedTokenDatabase:
     def set_block_len(self, block_len: list[int]):
         self.block_len = block_len
 
+    def set_block_size_scale(self, block_size_scale: list[int]):
+        self.block_size_scale = block_size_scale
+
     def set_group_buffers(
         self,
         group_kv_caches_base_addr: dict[int, list[int]],
         group_block_len: dict[int, list[int]],
+        group_block_size_scale: dict[int, list[int]] | None = None,
+        cache_role: str = "kv",
+        group_cache_families: dict[int, str] | None = None,
     ) -> None:
-        self.group_kv_caches_base_addr = group_kv_caches_base_addr
-        self.group_block_len = group_block_len
+        if cache_role == "state":
+            self.group_state_caches_base_addr = group_kv_caches_base_addr
+            self.group_state_block_len = group_block_len
+            self.group_state_block_size_scale = group_block_size_scale or {}
+        else:
+            self.group_kv_caches_base_addr = group_kv_caches_base_addr
+            self.group_block_len = group_block_len
+            self.group_kv_block_size_scale = group_block_size_scale or {}
+        if group_cache_families is not None:
+            self.group_cache_families[cache_role] = group_cache_families.copy()
+
+    def _get_group_buffers(self, kv_cache_group_id: int, cache_role: str) -> tuple[list[int], list[int], list[int]]:
+        if cache_role == "state":
+            return (
+                self.group_state_caches_base_addr.get(kv_cache_group_id, []),
+                self.group_state_block_len.get(kv_cache_group_id, []),
+                self.group_state_block_size_scale.get(kv_cache_group_id, []),
+            )
+        return (
+            self.group_kv_caches_base_addr.get(kv_cache_group_id, self.kv_caches_base_addr),
+            self.group_block_len.get(kv_cache_group_id, self.block_len),
+            self.group_kv_block_size_scale.get(kv_cache_group_id, self.block_size_scale),
+        )
 
     def prepare_value(
         self,
@@ -141,20 +254,36 @@ class ChunkedTokenDatabase:
         end: int,
         block_ids: list[int],
         kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
     ):
         addr_list = []
         size_list = []
         block_id = block_ids[start // self.block_size]
-        group_addrs = self.group_kv_caches_base_addr.get(kv_cache_group_id, self.kv_caches_base_addr)
-        group_block_len = self.group_block_len.get(kv_cache_group_id, self.block_len)
+        group_addrs, group_block_len, group_block_size_scale = self._get_group_buffers(kv_cache_group_id, cache_role)
         length = len(group_block_len)
         for index, base_addr in enumerate(group_addrs):
             block_len = group_block_len[index % length]
-            addr = base_addr + block_id * block_len
-            size = int(block_len / self.block_size * (end - start))
+            block_size_scale = group_block_size_scale[index % length] if group_block_size_scale else 1
+            addr = base_addr + block_id * block_len * block_size_scale
+            size = int(block_len * block_size_scale / self.block_size * (end - start))
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
+
+    def prepare_state_value(
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int],
+        state_group_id: int = 0,
+    ):
+        return self.prepare_value(
+            start,
+            end,
+            block_ids,
+            kv_cache_group_id=state_group_id,
+            cache_role="state",
+        )
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         block_id = block_ids[start // self.block_size]
@@ -174,6 +303,8 @@ class ChunkedTokenDatabase:
         block_hashes: list[BlockHash] | list[str],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+        cache_family: str | None = None,
     ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -211,7 +342,16 @@ class ChunkedTokenDatabase:
             if start_idx < mask_num:
                 continue
             else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val, kv_cache_group_id=kv_cache_group_id)
+                yield (
+                    start_idx,
+                    end_idx,
+                    self._make_key_by_hash(
+                        hash_val,
+                        kv_cache_group_id=kv_cache_group_id,
+                        cache_role=cache_role,
+                        cache_family=cache_family,
+                    ),
+                )
 
     def process_tokens_with_block_ids(
         self,
@@ -221,12 +361,16 @@ class ChunkedTokenDatabase:
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         skip_null_blocks: bool = False,
+        cache_role: str = "kv",
+        cache_family: str | None = None,
     ) -> Iterable[tuple[int, int, PoolKey, int]]:
         for start_idx, end_idx, key in self.process_tokens(
             token_len,
             block_hashes,
             mask_num,
             kv_cache_group_id=kv_cache_group_id,
+            cache_role=cache_role,
+            cache_family=cache_family,
         ):
             block_idx = start_idx // self.block_size
             if block_idx >= len(block_ids):
@@ -298,6 +442,9 @@ class RequestTracker:
     # FIXME: need to check whether the block ids will be changed after
     #        preemption
     allocated_block_ids_by_group: list[list[int]]
+    # Optional state block ids. If absent, state save/load falls back to KV
+    # block ids for the same group.
+    allocated_state_block_ids_by_group: list[list[int]] | None = None
 
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
@@ -363,7 +510,12 @@ class ReqMeta:
 
     current_event: torch.npu.Event | None = None
     kv_cache_group_ids: list[int] | None = None
+    kv_cache_families_by_group: list[str] | None = None
+    state_group_ids: list[int] | None = None
+    state_cache_families_by_group: list[str] | None = None
+    state_block_ids_by_group: list[list[int]] | None = None
     skip_null_blocks_by_group: list[bool] | None = None
+    skip_null_state_blocks_by_group: list[bool] | None = None
 
     # The following parameters are only used for kv event generation
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
@@ -380,6 +532,9 @@ class ReqMeta:
         is_last_chunk: bool | None = None,
         discard_partial_chunks: bool = True,
         original_block_size: int | None = None,
+        kv_cache_group_families: list[str] | None = None,
+        state_group_ids: list[int] | None = None,
+        state_cache_group_families: list[str] | None = None,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -443,6 +598,14 @@ class ReqMeta:
             token_ids=token_ids,
             original_block_size=original_block_size,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
+            kv_cache_families_by_group=kv_cache_group_families,
+            state_group_ids=state_group_ids,
+            state_cache_families_by_group=state_cache_group_families,
+            state_block_ids_by_group=(
+                tracker.allocated_state_block_ids_by_group
+                if tracker.allocated_state_block_ids_by_group is not None
+                else [group.copy() for group in tracker.allocated_block_ids_by_group]
+            ),
         )
 
 

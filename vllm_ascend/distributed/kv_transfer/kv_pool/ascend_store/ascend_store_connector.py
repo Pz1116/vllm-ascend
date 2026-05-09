@@ -27,6 +27,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import CacheLayout
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     get_zmq_rpc_path_lookup,
@@ -184,9 +185,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Worker Side Methods
     ############################################################
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        kv_states: dict[str, torch.Tensor] | None = None,
+        kv_layout: CacheLayout | None = None,
+    ):
         assert self.connector_worker is not None
-        self.connector_worker.register_kv_caches(kv_caches)
+        self.connector_worker.register_kv_caches(kv_caches, kv_states=kv_states, kv_layout=kv_layout)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -265,13 +271,15 @@ class LookupKeyServer:
             while self.running:
                 all_frames = self.socket.recv_multipart(copy=False)
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
-                group_ids = self.decoder.decode([all_frames[1]])
-                hash_frames = all_frames[2:]
+                kv_group_ids = self.decoder.decode([all_frames[1]])
+                state_group_ids = self.decoder.decode([all_frames[2]])
+                hash_frames = all_frames[3:]
                 hashes_str = self.decoder.decode(hash_frames)
                 result = self.pool_worker.lookup_scheduler(
                     token_len,
                     hashes_str,
-                    group_ids,
+                    kv_group_ids,
+                    state_group_ids,
                     self.use_layerwise,
                 )
                 response = result.to_bytes(4, "big")

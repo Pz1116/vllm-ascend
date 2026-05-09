@@ -30,6 +30,15 @@ To guarantee uniform hash generation, it is required to synchronize the PYTHONHA
 export PYTHONHASHSEED=0
 ```
 
+### Hybrid / DeepSeek-V4 Notes
+
+AscendStore KV Pool supports hybrid KV cache groups. For compress-aware models such as DeepSeek-V4:
+
+* All layers inside the same `kv_cache_group` must share the same `compress_ratio`. vLLM-Ascend validates this at runtime.
+* KV Pool keys are isolated by `kv_cache_group`, `cache_role` (`kv` or `state`), and `cache_family` (`c1`, `c4`, `c128`).
+* `kv_states` are optional at the connector interface and are only enabled when the worker really registers them. If the model does not provide `kv_states`, AscendStore falls back to KV-only transfer and lookup.
+* The current implementation targets the non-layerwise KV Pool path first.
+
 ## Example of using Mooncake as a KV Pool backend
 
 * Software:

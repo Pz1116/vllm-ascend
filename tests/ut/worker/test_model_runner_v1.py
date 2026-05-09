@@ -1,3 +1,4 @@
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -5,9 +6,26 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+sys.modules.setdefault("torch_npu", MagicMock())
 
 
+class _FakeNPU(SimpleNamespace):
+    def __getattr__(self, name):
+        return object
+
+
+if not hasattr(torch, "npu"):
+    torch.npu = _FakeNPU(Event=object, NPUGraph=object, ExternalEvent=object)  # type: ignore[attr-defined]
+elif not hasattr(torch.npu, "NPUGraph"):
+    torch.npu = _FakeNPU(**getattr(torch.npu, "__dict__", {}), NPUGraph=object, ExternalEvent=object)  # type: ignore[attr-defined]
+
+try:
+    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+except Exception:  # pragma: no cover - local UT env may miss NPU build artifacts.
+    NPUModelRunner = None
+
+
+@unittest.skipIf(NPUModelRunner is None, "NPUModelRunner import requires full NPU build environment")
 class TestNPUModelRunnerKVCache(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -84,6 +102,54 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
 
+@unittest.skipIf(NPUModelRunner is None, "NPUModelRunner import requires full NPU build environment")
+class TestDeepseekV4KVStateHelpers(unittest.TestCase):
+    def test_deepseek_v4_kv_state_and_layout(self):
+        runner = SimpleNamespace()
+        runner.device = torch.device("cpu")
+        runner.max_num_reqs = 2
+        runner.vllm_config = MagicMock()
+        runner.vllm_config.cache_config.block_size = 16
+        runner.model_config = MagicMock()
+        runner.model_config.hf_text_config = SimpleNamespace(
+            model_type="deepseek_v4",
+            compress_ratios=[4, 4],
+            head_dim=8,
+            index_head_dim=4,
+        )
+        runner.kv_cache_config = None
+        runner._align_memory = lambda tensor, alignment: tensor
+        kv_cache_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            head_size_v=8,
+            dtype=torch.float16,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["model.layers.0.self_attn", "model.layers.1.self_attn"],
+                    kv_cache_spec=kv_cache_spec,
+                )
+            ],
+        )
+        runner.kv_cache_config = kv_cache_config
+
+        kv_states = NPUModelRunner.initialize_kv_state(runner)
+        assert kv_states is not None
+        self.assertEqual(set(kv_states), {"model.layers.0.self_attn", "model.layers.1.self_attn"})
+        self.assertEqual(len(kv_states["model.layers.0.self_attn"]), 5)
+
+        kv_layout = NPUModelRunner.build_kv_transfer_layout(runner, kv_cache_config, kv_states)
+        assert kv_layout is not None
+        self.assertEqual(kv_layout.kv_groups[0].cache_family, "c4")
+        self.assertEqual(kv_layout.state_groups[0].cache_family, "c4")
+
+
+@unittest.skipIf(NPUModelRunner is None, "NPUModelRunner import requires full NPU build environment")
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
