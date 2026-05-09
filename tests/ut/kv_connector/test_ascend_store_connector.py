@@ -12,6 +12,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     ReqMeta,
     RequestTracker,
+    get_cache_family_granularity,
     infer_group_cache_families,
     normalize_block_ids_by_group,
 )
@@ -42,6 +43,12 @@ class TestAscendStoreGroupAwareConfig(unittest.TestCase):
             normalize_block_ids_by_group([[5, 6], [7, 8]]),
             [[5, 6], [7, 8]],
         )
+
+    def test_cache_family_granularity(self):
+        self.assertEqual(get_cache_family_granularity(128, "c1"), 128)
+        self.assertEqual(get_cache_family_granularity(128, "c4"), 512)
+        self.assertEqual(get_cache_family_granularity(128, "c128"), 16384)
+        self.assertEqual(get_cache_family_granularity(128, "default"), 128)
 
     def test_group_id_is_part_of_cache_key(self):
         metadata = KeyMetadata(
@@ -367,6 +374,27 @@ class TestAscendStoreGroupAwareConfig(unittest.TestCase):
 
         worker.use_sparse = True
         self.assertEqual(worker._get_group_num_kv_heads(0, "kv"), 1)
+
+    def test_dsv4_c128_lookup_rounds_down_to_effective_granularity(self):
+        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker.group_uses_align_state = [False]
+        worker.state_group_uses_align_state = []
+        worker.num_layers = 1
+        worker.cache_transfer_granularity = get_cache_family_granularity(128, "c128")
+        worker.m_store = SimpleNamespace(exists=lambda keys: [1] * 200 + [0] * (len(keys) - 200))
+        worker.token_database = ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0),
+            block_size=128,
+            partitions=None,
+        )
+
+        hit_tokens = worker.lookup(
+            token_len=32768,
+            block_hashes=[f"h{i}" for i in range(256)],
+            kv_cache_group_ids=[0],
+        )
+
+        self.assertEqual(hit_tokens, 16384)
 
     def test_register_kv_caches_accepts_single_tensor_values(self):
         worker = self._build_worker()

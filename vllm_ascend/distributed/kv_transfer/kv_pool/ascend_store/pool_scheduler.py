@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LoadSpec,
     ReqMeta,
     RequestTracker,
+    get_cache_family_granularity,
     infer_group_cache_families,
     normalize_block_ids_by_group,
 )
@@ -87,6 +88,7 @@ class KVPoolScheduler:
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
         self._block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*self.grouped_block_size)
+        self.cache_transfer_granularity = self._infer_cache_transfer_granularity()
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         self._preempted_req_ids: set[str] = set()
@@ -116,6 +118,37 @@ class KVPoolScheduler:
                 kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
             block_sizes.append(kv_cache_spec.block_size)
         return block_sizes
+
+    def _get_group_block_size(self, group_id: int) -> int:
+        if group_id >= len(self.grouped_block_size):
+            return self.grouped_block_size[0]
+        return self.grouped_block_size[group_id]
+
+    def _get_group_family(self, families: list[str], group_id: int) -> str:
+        if group_id >= len(families):
+            return "default"
+        return families[group_id]
+
+    def _infer_cache_transfer_granularity(self) -> int:
+        granularities = [self.lcm_block_size]
+        for group_id in self.kv_cache_group_ids:
+            granularities.append(
+                get_cache_family_granularity(
+                    self._get_group_block_size(group_id),
+                    self._get_group_family(self.kv_cache_group_families, group_id),
+                )
+            )
+        for group_id in self.state_group_ids:
+            granularities.append(
+                get_cache_family_granularity(
+                    self._get_group_block_size(group_id),
+                    self._get_group_family(self.state_cache_group_families, group_id),
+                )
+            )
+        return math.lcm(*granularities)
+
+    def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
+        return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 
     @staticmethod
     def _uses_hybrid_kv_cache(vllm_config: "VllmConfig", kv_cache_config: KVCacheConfig | None) -> bool:
@@ -191,11 +224,11 @@ class KVPoolScheduler:
             return 0, False
 
         if self._discard_partial_chunks:
-            token_len = len(request.prompt_token_ids) // self.lcm_block_size * self.lcm_block_size
+            token_len = self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
         else:
             token_len = len(request.prompt_token_ids)
 
-        if token_len < self.lcm_block_size:
+        if token_len < self.cache_transfer_granularity:
             return 0, False
 
         num_external_hit_tokens = self.client.lookup(
@@ -309,14 +342,14 @@ class KVPoolScheduler:
             )
             self._request_trackers[request.req_id] = request_tracker
             last_chunk_tokens_num = (
-                (len(request.prompt_token_ids) // self.lcm_block_size * self.lcm_block_size)
+                self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
                 if self._discard_partial_chunks
                 else len(request.prompt_token_ids)
             )
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
-                self.lcm_block_size,
+                self.cache_transfer_granularity,
                 load_spec=load_spec,
                 skip_save=force_skip_save,
                 block_hashes=request_real.block_hashes,
@@ -354,13 +387,13 @@ class KVPoolScheduler:
                     )
                     self._request_trackers[req_id] = request_tracker
                     last_chunk_tokens_num = (
-                        (len(request_real.prompt_token_ids) // self.lcm_block_size * self.lcm_block_size)
+                        self._floor_to_cache_transfer_granularity(len(request_real.prompt_token_ids))
                         if self._discard_partial_chunks
                         else len(request_real.prompt_token_ids)
                     )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
-                        self.lcm_block_size,
+                        self.cache_transfer_granularity,
                         load_spec=load_spec,
                         skip_save=force_skip_save,
                         block_hashes=request_real.block_hashes,
@@ -392,13 +425,13 @@ class KVPoolScheduler:
                     request_tracker.update(new_block_ids)
 
                     last_chunk_tokens_num = (
-                        (len(request.prompt_token_ids) // self.lcm_block_size * self.lcm_block_size)
+                        self._floor_to_cache_transfer_granularity(len(request.prompt_token_ids))
                         if self._discard_partial_chunks
                         else len(request.prompt_token_ids)
                     )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
-                        self.lcm_block_size,
+                        self.cache_transfer_granularity,
                         load_spec=None,
                         skip_save=force_skip_save,
                         block_hashes=request.block_hashes,
@@ -419,7 +452,7 @@ class KVPoolScheduler:
                 if not load_spec:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
-                if (num_tokens_to_compute % self.lcm_block_size != 0) and (
+                if (num_tokens_to_compute % self.cache_transfer_granularity != 0) and (
                     num_tokens_to_compute == len(request.prompt_token_ids) - 1
                 ):
                     num_tokens_to_compute = num_tokens_to_compute + 1
@@ -433,7 +466,7 @@ class KVPoolScheduler:
                 self._request_trackers[request_id] = request_tracker
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
-                    self.lcm_block_size,
+                    self.cache_transfer_granularity,
                     load_spec=load_spec,
                     skip_save=None,
                     block_hashes=request.block_hashes,

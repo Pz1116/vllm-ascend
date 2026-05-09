@@ -26,6 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     KeyMetadata,
     LayerMultiBlockReqMeta,
     ReqMeta,
+    get_cache_family_granularity,
     infer_group_cache_families,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -123,9 +124,12 @@ class KVPoolWorker:
             self.pp_rank,
         )
         self.num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups) if self.kv_cache_config is not None else 1
+        self.kv_cache_group_families = self._infer_group_families()
+        self.state_cache_group_families = self.kv_cache_group_families.copy() if self._requires_state_groups() else []
         self.group_uses_align_state = [False] * self.num_kv_cache_groups
         self.state_group_uses_align_state: list[bool] = []
         self.state_group_ids: list[int] = []
+        self.cache_transfer_granularity = self._infer_cache_transfer_granularity()
         if self.kv_cache_config is not None:
             for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
                 kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -199,6 +203,9 @@ class KVPoolWorker:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
         return infer_group_cache_families(kv_cache_groups, self.compress_ratios)
 
+    def _requires_state_groups(self) -> bool:
+        return self.model_type == "deepseek_v4" and self.use_compress
+
     @staticmethod
     def _uses_hybrid_kv_cache(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None) -> bool:
         if kv_cache_config is None:
@@ -224,6 +231,35 @@ class KVPoolWorker:
                 kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
             block_sizes.append(kv_cache_spec.block_size)
         return block_sizes
+
+    def _get_group_block_size(self, group_id: int) -> int:
+        if group_id >= len(self.grouped_block_size):
+            return self.grouped_block_size[0]
+        return self.grouped_block_size[group_id]
+
+    @staticmethod
+    def _get_group_family(families: list[str], group_id: int) -> str:
+        if group_id >= len(families):
+            return "default"
+        return families[group_id]
+
+    def _infer_cache_transfer_granularity(self) -> int:
+        granularities = [self.lcm_block_size]
+        for group_id in range(self.num_kv_cache_groups):
+            granularities.append(
+                get_cache_family_granularity(
+                    self._get_group_block_size(group_id),
+                    self._get_group_family(self.kv_cache_group_families, group_id),
+                )
+            )
+        for group_id in self.state_group_ids:
+            granularities.append(
+                get_cache_family_granularity(
+                    self._get_group_block_size(group_id),
+                    self._get_group_family(self.state_cache_group_families, group_id),
+                )
+            )
+        return math.lcm(*granularities)
 
     def _build_cache_layout(
         self,
@@ -498,7 +534,7 @@ class KVPoolWorker:
             if load_spec is None or not load_spec.can_load:  # load =0
                 continue
             token_len = request.token_len_chunk
-            if (load_spec.kvpool_cached_tokens % self.lcm_block_size != 0) and (
+            if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
             ):
                 token_len = request.load_spec.kvpool_cached_tokens + 1
@@ -871,7 +907,7 @@ class KVPoolWorker:
                 if group_id < len(skip_null_groups) and skip_null_groups[group_id]:
                     hit_end = 0
                     for index in range(len(ends) - 1, -1, -1):
-                        if res[index] == 1 and ends[index] % self.lcm_block_size == 0:  # type: ignore[index]
+                        if res[index] == 1 and ends[index] % self.cache_transfer_granularity == 0:  # type: ignore[index]
                             hit_end = ends[index]
                             break
                 else:
@@ -880,7 +916,7 @@ class KVPoolWorker:
                         if value != 1:
                             hit_end = 0
                             for hit_index in range(index, 0, -1):
-                                if starts[hit_index] % self.lcm_block_size == 0:
+                                if starts[hit_index] % self.cache_transfer_granularity == 0:
                                     hit_end = starts[hit_index]
                                     break
                             break
@@ -974,7 +1010,7 @@ class KVPoolWorker:
                     exists_by_block = [all(values[idx] == 1 for values in multi_tp_values) for idx in range(num_block)]
                     hit_end = 0
                     for index in range(num_block - 1, -1, -1):
-                        if exists_by_block[index] and ends[index] % self.lcm_block_size == 0:
+                        if exists_by_block[index] and ends[index] % self.cache_transfer_granularity == 0:
                             hit_end = ends[index]
                             break
                     hits.append(hit_end)
@@ -985,7 +1021,7 @@ class KVPoolWorker:
                     else:
                         hit_end = 0
                         for hit_index in range(index, 0, -1):
-                            if starts[hit_index] % self.lcm_block_size == 0:
+                            if starts[hit_index] % self.cache_transfer_granularity == 0:
                                 hit_end = starts[hit_index]
                                 break
                         hits.append(hit_end)

@@ -140,6 +140,17 @@ def infer_cache_family_from_ratio(compress_ratio: int | None) -> str:
     return f"c{compress_ratio}"
 
 
+def infer_cache_family_ratio(cache_family: str | None) -> int:
+    if not cache_family or not cache_family.startswith("c"):
+        return 1
+    ratio = cache_family[1:]
+    return int(ratio) if ratio.isdigit() else 1
+
+
+def get_cache_family_granularity(block_size: int, cache_family: str | None) -> int:
+    return block_size * infer_cache_family_ratio(cache_family)
+
+
 def infer_group_cache_families(
     kv_cache_groups: Sequence[object] | None,
     compress_ratios: Sequence[int] | None,
