@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 
 import vllm.envs as envs
@@ -445,7 +446,8 @@ class KVPoolScheduler:
             return False, None
         delay_free_blocks = len(block_ids) > 0
         if delay_free_blocks:
-            logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
         return delay_free_blocks, None
 
     def request_finished_all_groups(
@@ -493,9 +495,11 @@ class LookupKeyClient:
         self,
         token_len: int,
         block_hashes: list[BlockHash],
-        kv_cache_group_ids: list[int],
-        state_group_ids: list[int],
+        kv_cache_group_ids: list[int] | None = None,
+        state_group_ids: list[int] | None = None,
     ) -> int:
+        kv_cache_group_ids = kv_cache_group_ids or [0]
+        state_group_ids = state_group_ids or []
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)

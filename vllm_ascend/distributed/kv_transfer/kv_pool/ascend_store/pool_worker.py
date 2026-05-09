@@ -1,4 +1,5 @@
 import importlib
+import logging
 import math
 import threading
 from collections.abc import Generator
@@ -534,7 +535,7 @@ class KVPoolWorker:
             if self.current_layer == self.num_layers - 1:
                 assert ret_token_mask is not None
                 num_retrieved_tokens = ret_token_mask.sum().item()
-                logger.debug(f"Retrieved {num_retrieved_tokens} tokens")
+                logger.debug("Retrieved %s tokens", num_retrieved_tokens)
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         if self.current_layer == 0:
@@ -570,7 +571,8 @@ class KVPoolWorker:
             if can_save is None or not can_save:
                 continue
             current_event = torch.npu.Event()
-            current_event.record()
+            if hasattr(current_event, "record"):
+                current_event.record()
             break
 
         for request in connector_metadata.requests:
@@ -658,7 +660,7 @@ class KVPoolWorker:
                 yield None
 
         retrieved_tokens = torch.sum(ret_mask)
-        logger.debug(f"Retrieved {retrieved_tokens} out of {num_required_tokens} out of total {token_len} tokens")
+        logger.debug("Retrieved %s out of %s out of total %s tokens", retrieved_tokens, num_required_tokens, token_len)
 
         yield ret_mask
 
@@ -734,12 +736,13 @@ class KVPoolWorker:
             else set()
         )
 
-        logger.debug(
-            "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
-            len(done_sending),
-            len(done_recving),
-            self.tp_rank,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
+                len(done_sending),
+                len(done_recving),
+                self.tp_rank,
+            )
         return done_sending, done_recving
 
     def get_and_clear_finished_requests(self, finished_req_ids, meta: AscendConnectorMetadata) -> set[str]:
@@ -781,9 +784,9 @@ class KVPoolWorker:
         self,
         token_len: int,
         block_hashes: list[BlockHash],
-        kv_cache_group_ids: list[int],
-        state_group_ids: list[int] | None,
-        use_layerwise: bool,
+        kv_cache_group_ids: list[int] | None = None,
+        state_group_ids: list[int] | None = None,
+        use_layerwise: bool = False,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -792,6 +795,7 @@ class KVPoolWorker:
         """
         try:
             hits = []
+            kv_cache_group_ids = kv_cache_group_ids or [0]
             cache_specs: list[tuple[str, int, list[bool]]] = [
                 ("kv", group_id, self.group_uses_align_state) for group_id in kv_cache_group_ids
             ]
@@ -840,7 +844,7 @@ class KVPoolWorker:
                             break
                 hits.append(hit_end)
         except Exception as e:
-            logger.error(f"Remote connection failed in contains: {e}")
+            logger.error("Remote connection failed in contains: %s", e)
             return 0
         return min(hits) if hits else 0
 
@@ -855,9 +859,9 @@ class KVPoolWorker:
         self,
         token_len: int,
         block_hashes: list[BlockHash],
-        kv_cache_group_ids: list[int],
-        state_group_ids: list[int] | None,
-        use_layerwise: bool,
+        kv_cache_group_ids: list[int] | None = None,
+        state_group_ids: list[int] | None = None,
+        use_layerwise: bool = False,
     ) -> int:
         """
         Checks the existence of KV cache of the tokens from the cache engine.
@@ -866,6 +870,7 @@ class KVPoolWorker:
         """
         try:
             hits = []
+            kv_cache_group_ids = kv_cache_group_ids or [0]
             cache_specs: list[tuple[str, int, list[bool]]] = [
                 ("kv", group_id, self.group_uses_align_state) for group_id in kv_cache_group_ids
             ]
@@ -935,7 +940,7 @@ class KVPoolWorker:
                     index = self.find_min_first_non_one_index(multi_tp_values)
                     hits.append(starts[index] if index != -1 else end)
         except Exception as e:
-            logger.error(f"Remote connection failed in contains: {e}")
+            logger.error("Remote connection failed in contains: %s", e)
             return 0
         return min(hits) if hits else 0
 
