@@ -206,7 +206,7 @@ class TestRequestTracker(unittest.TestCase):
         tracker = RequestTracker.from_new_request(new_req, num_tokens_to_compute=48)
         self.assertEqual(tracker.req_id, "req-1")
         self.assertEqual(tracker.token_len, 48)
-        self.assertEqual(tracker.allocated_block_ids, [10, 20, 30])
+        self.assertEqual(tracker.allocated_block_ids_by_group, [[10, 20, 30]])
         self.assertEqual(len(tracker.token_ids), 48)
         self.assertEqual(tracker.num_saved_tokens, 0)
 
@@ -217,25 +217,25 @@ class TestRequestTracker(unittest.TestCase):
         new_req.prompt_token_ids = list(range(32))
 
         tracker = RequestTracker.from_new_request(new_req, num_tokens_to_compute=32)
-        self.assertEqual(tracker.allocated_block_ids, [10, 20])
+        self.assertEqual(tracker.allocated_block_ids_by_group, [[10, 20], [30, 40]])
 
     def test_update_with_list(self):
-        tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids=[1, 2])
+        tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids_by_group=[[1, 2]])
         tracker.update([3, 4])
-        self.assertEqual(tracker.allocated_block_ids, [1, 2, 3, 4])
+        self.assertEqual(tracker.allocated_block_ids_by_group, [[1, 2, 3, 4]])
 
     def test_update_with_tuple(self):
-        tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids=[1])
+        tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids_by_group=[[1]])
         tracker.update(([5, 6], [7, 8]))
-        self.assertEqual(tracker.allocated_block_ids, [1, 5, 6])
+        self.assertEqual(tracker.allocated_block_ids_by_group, [[1, 5, 6], [7, 8]])
 
     def test_update_with_empty(self):
-        tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids=[1])
+        tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids_by_group=[[1]])
         tracker.update([])
-        self.assertEqual(tracker.allocated_block_ids, [1])
+        self.assertEqual(tracker.allocated_block_ids_by_group, [[1]])
 
     def test_update_invalid_type(self):
-        tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids=[1])
+        tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids_by_group=[[1]])
         with self.assertRaises(ValueError):
             tracker.update("invalid")  # type: ignore[arg-type]
 
@@ -245,7 +245,7 @@ class TestReqMeta(unittest.TestCase):
         tracker = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=0,
             token_ids=list(range(32)),
         )
@@ -260,7 +260,7 @@ class TestReqMeta(unittest.TestCase):
         tracker = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=0,
         )
         meta = ReqMeta.from_request_tracker(tracker, block_size=16, skip_save=True)
@@ -270,7 +270,7 @@ class TestReqMeta(unittest.TestCase):
         tracker = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=0,
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True)
@@ -282,7 +282,7 @@ class TestReqMeta(unittest.TestCase):
         tracker = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=32,
         )
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=False)
@@ -297,7 +297,7 @@ class TestReqMeta(unittest.TestCase):
         tracker = RequestTracker(
             req_id="r1",
             token_len=20,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=0,
         )
         meta = ReqMeta.from_request_tracker(tracker, block_size=16, discard_partial_chunks=True)
@@ -308,7 +308,7 @@ class TestReqMeta(unittest.TestCase):
         tracker = RequestTracker(
             req_id="r1",
             token_len=20,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=0,
         )
         meta = ReqMeta.from_request_tracker(tracker, block_size=16, discard_partial_chunks=False)
@@ -319,7 +319,7 @@ class TestReqMeta(unittest.TestCase):
         tracker = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=32,
         )
         meta = ReqMeta.from_request_tracker(tracker, block_size=16)
@@ -332,7 +332,7 @@ class TestReqMeta(unittest.TestCase):
         tracker = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=0,
         )
         meta = ReqMeta.from_request_tracker(tracker, block_size=16, original_block_size=8)
@@ -346,7 +346,7 @@ class TestAscendConnectorMetadata(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             block_hashes=[],
         )
         meta.add_request(req)
@@ -361,7 +361,7 @@ class TestLayerMultiBlockReqMeta(unittest.TestCase):
             keys=[],
             starts=[0, 16],
             ends=[16, 32],
-            block_ids=[0, 1],
+            block_ids_by_group=[[0, 1]],
             layer_id=2,
         )
         self.assertEqual(meta.req_id, "r1")

@@ -430,7 +430,7 @@ class LoadSpec:
     token_len: int = 0
 
 
-@dataclass(init=False)
+@dataclass
 class RequestTracker:
     # Request id
     req_id: str
@@ -452,33 +452,6 @@ class RequestTracker:
     # The token ids that has been scheduled so far
     # NOTE: This field will only be used when you enable kv-event
     token_ids: list[int] | None = None
-
-    def __init__(
-        self,
-        req_id: str,
-        token_len: int,
-        allocated_block_ids_by_group: list[list[int]] | None = None,
-        allocated_state_block_ids_by_group: list[list[int]] | None = None,
-        num_saved_tokens: int = 0,
-        token_ids: list[int] | None = None,
-        allocated_block_ids: list[int] | None = None,
-    ):
-        self.req_id = req_id
-        self.token_len = token_len
-        if allocated_block_ids_by_group is None:
-            allocated_block_ids_by_group = normalize_block_ids_by_group(allocated_block_ids or [])
-        self.allocated_block_ids_by_group = allocated_block_ids_by_group
-        self.allocated_state_block_ids_by_group = allocated_state_block_ids_by_group
-        self.num_saved_tokens = num_saved_tokens
-        self.token_ids = token_ids
-
-    @property
-    def allocated_block_ids(self) -> list[int]:
-        return self.allocated_block_ids_by_group[0] if self.allocated_block_ids_by_group else []
-
-    @allocated_block_ids.setter
-    def allocated_block_ids(self, block_ids: list[int]) -> None:
-        self.allocated_block_ids_by_group = normalize_block_ids_by_group(block_ids)
 
     @staticmethod
     def from_new_request(
@@ -518,7 +491,7 @@ class RequestTracker:
             self.allocated_block_ids_by_group[group_id].extend(ids)
 
 
-@dataclass(init=False)
+@dataclass
 class ReqMeta:
     # Request id
     req_id: str
@@ -548,55 +521,6 @@ class ReqMeta:
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
     token_ids: list[int] | None = None
     original_block_size: int | None = None
-
-    def __init__(
-        self,
-        req_id: str,
-        token_len_chunk: int,
-        block_ids_by_group: list[list[int]] | None = None,
-        block_hashes: list[BlockHash] | None = None,
-        can_save: bool | None = None,
-        load_spec: LoadSpec | None = None,
-        is_last_chunk: bool | None = None,
-        current_event: torch.npu.Event | None = None,
-        kv_cache_group_ids: list[int] | None = None,
-        kv_cache_families_by_group: list[str] | None = None,
-        state_group_ids: list[int] | None = None,
-        state_cache_families_by_group: list[str] | None = None,
-        state_block_ids_by_group: list[list[int]] | None = None,
-        skip_null_blocks_by_group: list[bool] | None = None,
-        skip_null_state_blocks_by_group: list[bool] | None = None,
-        token_ids: list[int] | None = None,
-        original_block_size: int | None = None,
-        block_ids: list[int] | None = None,
-    ):
-        self.req_id = req_id
-        self.token_len_chunk = token_len_chunk
-        if block_ids_by_group is None:
-            block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
-        self.block_ids_by_group = block_ids_by_group
-        self.block_hashes = block_hashes or []
-        self.can_save = can_save
-        self.load_spec = load_spec
-        self.is_last_chunk = is_last_chunk
-        self.current_event = current_event
-        self.kv_cache_group_ids = kv_cache_group_ids
-        self.kv_cache_families_by_group = kv_cache_families_by_group
-        self.state_group_ids = state_group_ids
-        self.state_cache_families_by_group = state_cache_families_by_group
-        self.state_block_ids_by_group = state_block_ids_by_group
-        self.skip_null_blocks_by_group = skip_null_blocks_by_group
-        self.skip_null_state_blocks_by_group = skip_null_state_blocks_by_group
-        self.token_ids = token_ids
-        self.original_block_size = original_block_size
-
-    @property
-    def block_ids(self) -> list[int]:
-        return self.block_ids_by_group[0] if self.block_ids_by_group else []
-
-    @block_ids.setter
-    def block_ids(self, block_ids: list[int]) -> None:
-        self.block_ids_by_group = normalize_block_ids_by_group(block_ids)
 
     @staticmethod
     def from_request_tracker(
@@ -700,7 +624,7 @@ class AscendConnectorMetadata(KVConnectorMetadata):
         self.requests.append(req_meta)
 
 
-@dataclass(init=False)
+@dataclass
 class LayerMultiBlockReqMeta:
     req_id: str
     keys: list[LayerPoolKey]
@@ -710,34 +634,3 @@ class LayerMultiBlockReqMeta:
     layer_id: int
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
-
-    def __init__(
-        self,
-        req_id: str,
-        keys: list[LayerPoolKey],
-        starts: list[int],
-        ends: list[int],
-        block_ids_by_group: list[list[int]] | None = None,
-        layer_id: int = 0,
-        is_last_chunk: bool | None = True,
-        current_event: torch.npu.Event | None = None,
-        block_ids: list[int] | None = None,
-    ):
-        self.req_id = req_id
-        self.keys = keys
-        self.starts = starts
-        self.ends = ends
-        if block_ids_by_group is None:
-            block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
-        self.block_ids_by_group = block_ids_by_group
-        self.layer_id = layer_id
-        self.is_last_chunk = is_last_chunk
-        self.current_event = current_event
-
-    @property
-    def block_ids(self) -> list[int]:
-        return self.block_ids_by_group[0] if self.block_ids_by_group else []
-
-    @block_ids.setter
-    def block_ids(self, block_ids: list[int]) -> None:
-        self.block_ids_by_group = normalize_block_ids_by_group(block_ids)

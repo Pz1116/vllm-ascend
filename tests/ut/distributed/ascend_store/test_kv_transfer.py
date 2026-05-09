@@ -192,7 +192,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=64,
-            block_ids=[0, 1, 2, 3],
+            block_ids_by_group=[[0, 1, 2, 3]],
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -208,7 +208,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids_by_group=[[0, 1]],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -222,7 +222,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -235,7 +235,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
             token_ids=list(range(16)),
@@ -252,7 +252,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -285,7 +285,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             current_event=event,
         )
@@ -310,7 +310,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids_by_group=[[0, 1]],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
         )
@@ -337,7 +337,7 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids_by_group=[[0, 1]],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             load_spec=load_spec,
         )
@@ -372,7 +372,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             keys=keys,
             starts=[i * 16 for i in range(num_keys)],
             ends=[(i + 1) * 16 for i in range(num_keys)],
-            block_ids=list(range(num_keys)),
+            block_ids_by_group=[list(range(num_keys))],
             layer_id=layer_id,
             is_last_chunk=is_last_chunk,
             current_event=None,
@@ -410,7 +410,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             keys=[],
             starts=[],
             ends=[],
-            block_ids=[],
+            block_ids_by_group=[[]],
             layer_id=0,
             is_last_chunk=True,
         )
@@ -427,7 +427,7 @@ class TestKVCacheStoreLayerSendingThread(unittest.TestCase):
             keys=[LayerPoolKey(meta, "h0", 0)],
             starts=[0],
             ends=[16],
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             layer_id=0,
             is_last_chunk=False,
             current_event=event,
@@ -465,7 +465,7 @@ class TestKVCacheStoreLayerRecvingThread(unittest.TestCase):
             keys=[LayerPoolKey(meta, "h0", 0)],
             starts=[0],
             ends=[16],
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             layer_id=0,
         )
         t.request_queue.put(req)

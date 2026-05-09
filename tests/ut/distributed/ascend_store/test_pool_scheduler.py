@@ -205,7 +205,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         scheduler._request_trackers["r1"] = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=32,
         )
         request = MagicMock()
@@ -222,7 +222,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         scheduler._request_trackers["r1"] = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
             num_saved_tokens=32,
         )
         request = MagicMock()
@@ -304,7 +304,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         scheduler._request_trackers["r1"] = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
         )
         scheduler._unfinished_requests["r1"] = (MagicMock(), [0, 1])
         scheduler._unfinished_request_ids.add("r1")
@@ -358,7 +358,7 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         scheduler._request_trackers["r1"] = RequestTracker(
             req_id="r1",
             token_len=32,
-            allocated_block_ids=[0, 1],
+            allocated_block_ids_by_group=[[0, 1]],
         )
         scheduler._unfinished_requests["r1"] = (MagicMock(), [0, 1])
 

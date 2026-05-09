@@ -508,7 +508,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             block_hashes=["h0"],
             load_spec=load_spec,
         )
@@ -522,7 +522,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             block_hashes=["h0"],
             load_spec=None,
         )
@@ -538,7 +538,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             block_hashes=["h0"],
             can_save=True,
         )
@@ -555,7 +555,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids_by_group=[[0]],
             block_hashes=["h0"],
             can_save=False,
         )
