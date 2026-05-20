@@ -4,7 +4,6 @@ import copy
 import hashlib
 import logging
 import math
-import os
 import queue
 import random
 import struct
@@ -20,7 +19,6 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
-import torch_npu
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm import envs
@@ -42,16 +40,11 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
-
-from vllm_ascend import envs as ascend_envs
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import enable_custom_op, is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
@@ -63,6 +56,21 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+
+
+def _bind_current_device(device_id: int | None) -> None:
+    if device_id is not None:
+        current_platform.set_device(device_id)  # type: ignore[arg-type]
+
+
+def _current_device_index() -> int | None:
+    if hasattr(torch, "accelerator"):
+        return torch.accelerator.current_device_index()
+    return None
+
+
+def is_vl_model(_vllm_config: VllmConfig) -> bool:
+    return False
 
 
 class RemotePortInfo(TypedDict):
@@ -212,6 +220,7 @@ class KVCacheSendingThread(threading.Thread):
         self.kv_caches = kv_caches
         self.pcp_rank = pcp_rank
         self.port_send_num: dict[str, int] = {}
+        self.device_id = _current_device_index()
 
         self.task_tracker = KVCacheTaskTracker()
 
@@ -232,6 +241,7 @@ class KVCacheSendingThread(threading.Thread):
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         try:
+            _bind_current_device(self.device_id)
             # Listen for new requests for metadata. NOTE(rob): we need each rank
             # to have a unique port. This hack to keeps us moving. We will
             # switch when moving to etcd or where we have a single ZMQ socket in
@@ -355,6 +365,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.vllm_config = vllm_config
         self.model_config = self.vllm_config.model_config
         self.block_size = self.vllm_config.cache_config.block_size
+        self.device_id = _current_device_index()
         self.num_layers = self.model_config.hf_text_config.num_hidden_layers
         self.pp_layer_indices = {
             rank: get_prefill_pp_indices(self.num_layers, rank, self._prefill_pp_size, prefill_pp_layer_partition)
@@ -452,6 +463,7 @@ class KVCacheRecvingThread(threading.Thread):
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
+        _bind_current_device(self.device_id)
         self.ready_event.set()
         while True:
             try:
@@ -519,6 +531,7 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _transfer_kv_cache(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
+        _bind_current_device(self.device_id)
         remote_request_id = req_meta["remote_request_id"]
         remote_block_ids = req_meta["remote_block_ids"]
         local_block_ids = req_meta["local_block_ids"]
@@ -616,39 +629,17 @@ class KVCacheRecvingThread(threading.Thread):
         # the KV transmission.
         is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
-        need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
-        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
-        if need_nz_cache or need_cat_cache:
-            # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
-            if use_fused_op and enable_custom_op():
-                if need_cat_cache:
-                    # the fused op only support cat GQA/MHA kv cache by head
-                    self.reformat_kv_cache_with_fused_op(grouped_local_block_ids, tp_num_need_pulls)
-                if need_nz_cache:
-                    # maybe use fused op to reformat kv nz too in the future.
-                    self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, False, need_nz_cache)
-            else:
-                self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls, need_cat_cache, need_nz_cache)
+        if need_cat_cache:
+            logger.info(
+                "Mooncake adapter handles TP-mismatch KV transfer by writing "
+                "remote TP shards directly to local cache offsets. Skip "
+                "post-transfer cat reformat."
+            )
 
     def reformat_kv_cache_with_fused_op(self, block_ids: list[list[int]], tp_num_need_pulls: int):
-        # Get necessary parameters
-        k_cache = list(self.kv_caches.values())[0][0]
-        device = k_cache.device
-        head_dim = self.model_config.hf_text_config.head_dim
-        block_size = self.vllm_config.cache_config.block_size
-        num_kv_head = max(self.model_config.hf_text_config.num_key_value_heads // self.tp_size, 1)
-        layers = len(self.kv_caches)
-        flat_block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
-
-        k_caches = []
-        v_caches = []
-        for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
-            k_caches.append(k_cache_layer)
-            v_caches.append(v_cache_layer)
-
-        torch.ops._C_ascend.transpose_kv_cache_by_block(
-            k_caches, v_caches, block_ids_tensor, block_size, num_kv_head, head_dim, tp_num_need_pulls, layers
+        raise NotImplementedError(
+            "This Mooncake connector writes TP shards directly to final cache "
+            "offsets and does not support post-transfer fused KV reformat."
         )
 
     def reformat_kv_cache(
@@ -658,90 +649,18 @@ class KVCacheRecvingThread(threading.Thread):
         need_cat_cache: bool = False,
         need_nz_cache: bool = False,
     ):
-        # Get necessary parameters
-        k_cache = list(self.kv_caches.values())[0][0]
-        dtype = k_cache.dtype
-        device = k_cache.device
-
-        flat_block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
-        num_blocks = len(flat_block_ids)
-        num_tokens = num_blocks * self.block_size
-
-        # Create device tensors for copy operations
-        block_table = block_ids_tensor.view(1, -1)
-        block_len_tensor = torch.tensor([num_tokens], dtype=torch.int32, device=device)
-        seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
-
-        # Initialize buffers
-        k_buffer = torch.empty((num_tokens, self.num_kv_heads, self.k_head_dim), dtype=dtype, device=device)
-        v_buffer = torch.empty((num_tokens, self.num_kv_heads, self.v_head_dim), dtype=dtype, device=device)
-
-        # Create slot mapping for reshape operations
-        block_offsets = torch.arange(0, self.block_size, dtype=torch.int32, device=device)
-        slot_mapping = (
-            block_offsets.reshape((1, self.block_size)) + block_ids_tensor.reshape((num_blocks, 1)) * self.block_size
-        ).flatten()
-
-        # FIXME: Right now, if we skip synchronization at this point, the system
-        # will crash in GQA scenarios. However, we still haven't identified the
-        # root cause.
-        torch.npu.synchronize()
-
-        # Process each layer in the KV cache
-        for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
-            # Load cache data into buffers
-            torch_npu.atb.npu_paged_cache_load(
-                k_cache_layer,
-                v_cache_layer,
-                block_table,
-                block_len_tensor,
-                seq_starts=seq_start_tensor,
-                key=k_buffer,
-                value=v_buffer,
-            )
-            if need_cat_cache:
-                self._cat_kv_cache(
-                    k_cache_layer,
-                    v_cache_layer,
-                    k_buffer,
-                    v_buffer,
-                    tp_num_need_pulls,
-                    num_blocks,
-                    num_tokens,
-                    slot_mapping,
-                )
-            if need_nz_cache:
-                self._nz_kv_cache(k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping)
-        # Clean up buffers
-        del k_buffer, v_buffer
+        raise NotImplementedError(
+            "This Mooncake connector writes TP shards directly to final cache "
+            "offsets and does not support post-transfer KV reformat."
+        )
 
     def _cat_kv_cache(
         self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, tp_num_need_pulls, num_blocks, num_tokens, slot_mapping
     ):
-        def _transpose_kv_cache_between_head(buffer: torch.Tensor) -> torch.Tensor:
-            buffer = buffer.view(num_blocks, tp_num_need_pulls, self.block_size, -1)
-            buffer.transpose_(1, 2)
-            return buffer.contiguous().view(num_tokens, self.num_kv_heads, -1)
-
-        # Transpose KV cache
-        k_buffer = _transpose_kv_cache_between_head(k_buffer)
-        v_buffer = _transpose_kv_cache_between_head(v_buffer)
-
-        # Reshape and cache the processed buffers
-        torch_npu._npu_reshape_and_cache(
-            key=k_buffer, value=v_buffer, key_cache=k_cache_layer, value_cache=v_cache_layer, slot_indices=slot_mapping
-        )
+        raise NotImplementedError("Post-transfer cat KV cache is not supported.")
 
     def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer, slot_mapping):
-        nz_fmt_last_dim = 16
-        k_cache_layer = k_cache_layer.view(
-            -1, self.k_head_dim * self.num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
-        )
-        v_cache_layer = v_cache_layer.view(
-            -1, self.v_head_dim * self.num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
-        )
-        torch_npu.npu_scatter_pa_kv_cache(k_buffer, v_buffer, k_cache_layer, v_cache_layer, slot_mapping)
+        raise NotImplementedError("NZ KV cache is not supported.")
 
     def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
         """Get the metadata from the remote host."""
@@ -861,6 +780,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 class MooncakeConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
+        super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
@@ -966,8 +886,6 @@ class MooncakeConnectorScheduler:
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
-        init_ascend_config(vllm_config)
-        self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
         self.local_ip = get_ip()
@@ -1151,7 +1069,8 @@ class MooncakeConnectorWorker:
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self._get_prefill_decode_size(vllm_config)
-        os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
+        self.device_id = _current_device_index()
+        _bind_current_device(self.device_id)
         if self._prefill_tp_size < self._decode_tp_size:
             raise ValueError(
                 f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
@@ -1160,7 +1079,6 @@ class MooncakeConnectorWorker:
 
         # Metadata.
         self.vllm_config = vllm_config
-        self.ascend_config = get_ascend_config()
         self.engine_id = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -1193,7 +1111,18 @@ class MooncakeConnectorWorker:
         device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
+        protocol = vllm_config.kv_transfer_config.get_from_extra_config(
+            "mooncake_protocol", "rdma"
+        )
+        self.engine = TransferEngine()
+        ret_value = self.engine.initialize(
+            self.side_channel_host, "P2PHANDSHAKE", protocol, ""
+        )
+        if ret_value != 0:
+            raise RuntimeError(
+                "Mooncake TransferEngine initialization failed with "
+                f"ret_value: {ret_value}"
+            )
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
@@ -1287,7 +1216,15 @@ class MooncakeConnectorWorker:
                 kv_caches_base_addr.append(base_addr)
                 ptrs.append(base_addr)
                 lengths.append(region_len)
-        global_te.register_buffer(ptrs, lengths)
+        if hasattr(self.engine, "batch_register_memory"):
+            ret_value = self.engine.batch_register_memory(ptrs, lengths)
+            if ret_value != 0:
+                raise RuntimeError("Mooncake batch memory registration failed.")
+        else:
+            for ptr, region_len in zip(ptrs, lengths):
+                ret_value = self.engine.register_memory(ptr, region_len)
+                if ret_value != 0:
+                    raise RuntimeError("Mooncake memory registration failed.")
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,
