@@ -28,12 +28,14 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
     SupportsHMA,
 )
 from vllm.distributed.parallel_state import (
     get_decode_context_model_parallel_rank,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tp_group,
     get_world_group,
@@ -110,6 +112,8 @@ class ReqMeta:
     remote_tp_size: int | None
     remote_pcp_size: int | None
     remote_dcp_size: int | None
+    remote_tp_rank: int | None = None
+    remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]] = field(default_factory=dict)
     chunk_finish: bool = False
     prompt_len: int = 0
     trans_count: list[int] | None = None
@@ -117,6 +121,7 @@ class ReqMeta:
     local_computed_tokens: int = 0
     local_transed_tokens: int = 0
     do_virtual: bool = False
+    request_id: str | None = None
 
 
 @dataclass
@@ -147,6 +152,85 @@ class TransferMeta:
     dst: list[int]
     length: list[int]
     req_ids: list[str]
+
+
+@dataclass(frozen=True)
+class TransferPlan:
+    local_region_offset: int
+    remote_region_offset: int
+    transfer_len: int
+    split_by_token: bool = False
+
+
+def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
+    if local_tp_size >= remote_tp_size:
+        assert local_tp_size % remote_tp_size == 0, (
+            f"Local tensor parallel size {local_tp_size} is not divisible "
+            f"by remote tensor parallel size {remote_tp_size}."
+        )
+        return local_tp_size // remote_tp_size
+
+    assert remote_tp_size % local_tp_size == 0, (
+        f"Remote tensor parallel size {remote_tp_size} is not divisible by local tensor parallel size {local_tp_size}."
+    )
+    return -(remote_tp_size // local_tp_size)
+
+
+def _producer_cache_is_replicated(
+    *,
+    is_mla: bool,
+    producer_tp_size: int,
+    num_key_value_heads: int,
+) -> bool:
+    return is_mla or producer_tp_size > num_key_value_heads
+
+
+def _compute_sender_transfer_plan(
+    *,
+    local_tp_rank: int,
+    local_tp_size: int,
+    remote_tp_rank: int,
+    remote_tp_size: int,
+    local_block_len: int,
+    remote_block_len: int,
+    block_size: int,
+    producer_cache_replicated: bool,
+) -> TransferPlan:
+    """Plan one Prefill-rank write into one Decode-rank KV block."""
+    tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
+
+    if tp_ratio == 1:
+        assert local_block_len == remote_block_len, (
+            f"Homogeneous TP KV block length mismatch: local={local_block_len}, remote={remote_block_len}."
+        )
+        return TransferPlan(0, 0, local_block_len)
+
+    if producer_cache_replicated:
+        assert local_block_len == remote_block_len, (
+            "Replicated producer KV block length must match Decode KV block "
+            f"length, got local={local_block_len}, remote={remote_block_len}."
+        )
+        return TransferPlan(0, 0, local_block_len)
+
+    assert local_block_len % block_size == 0 and remote_block_len % block_size == 0
+    local_token_len = local_block_len // block_size
+    remote_token_len = remote_block_len // block_size
+
+    if tp_ratio > 0:
+        assert remote_block_len == local_block_len * tp_ratio, (
+            "Decode KV block length must cover all Prefill TP slices when "
+            f"Prefill TP is larger, got local={local_block_len}, "
+            f"remote={remote_block_len}, tp_ratio={tp_ratio}."
+        )
+        return TransferPlan(0, (local_tp_rank % tp_ratio) * local_token_len, local_token_len, True)
+
+    ratio_abs = -tp_ratio
+    assert local_block_len == remote_block_len * ratio_abs, (
+        "Prefill KV block length must cover all Decode TP slices when Decode "
+        f"TP is larger, got local={local_block_len}, remote={remote_block_len}, "
+        f"tp_ratio={tp_ratio}."
+    )
+    return TransferPlan((remote_tp_rank % ratio_abs) * remote_token_len, 0, remote_token_len, True)
 
 
 @dataclass
@@ -212,6 +296,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         tp_rank: int,
         pd_head_ratio: int,
         num_head_replica: int,
+        total_num_kv_heads: int,
         layer_metadata: dict[str, LayerMetadata],
         use_mla: bool,
         use_attn_mamba_hybrid: bool,
@@ -238,6 +323,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.tp_rank = tp_rank
         self.pd_head_ratio = pd_head_ratio
         self.num_head_replica = num_head_replica
+        self.total_num_kv_heads = total_num_kv_heads
         self.layer_metadata = layer_metadata
         self.total_layers = total_layers
         self.use_mla = use_mla
@@ -275,6 +361,94 @@ class KVCacheSendingLayerThread(threading.Thread):
         except Exception as e:
             logger.error("Failed to transfer KV cache for layer idx %s, %s", send_task.layer_idx, e)
 
+    def _append_transfer_meta(
+        self,
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+        *,
+        local_base_addr: int,
+        remote_base_addr: int,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        local_block_len: int,
+        remote_block_len: int,
+        block_size: int,
+        req_meta: ReqMeta,
+        local_block_offset: Callable[[int], int] | None = None,
+    ) -> None:
+        remote_tp_size = req_meta.remote_tp_size or self.tp_size
+        remote_tp_rank = req_meta.remote_tp_rank if req_meta.remote_tp_rank is not None else self.tp_rank
+        transfer_plan = _compute_sender_transfer_plan(
+            local_tp_rank=self.tp_rank,
+            local_tp_size=self.tp_size,
+            remote_tp_rank=remote_tp_rank,
+            remote_tp_size=remote_tp_size,
+            local_block_len=local_block_len,
+            remote_block_len=remote_block_len,
+            block_size=block_size,
+            producer_cache_replicated=_producer_cache_is_replicated(
+                is_mla=self.use_mla,
+                producer_tp_size=self.tp_size,
+                num_key_value_heads=self.total_num_kv_heads,
+            ),
+        )
+
+        can_coalesce = (
+            local_block_offset is None
+            and not transfer_plan.split_by_token
+            and transfer_plan.local_region_offset == 0
+            and transfer_plan.remote_region_offset == 0
+            and transfer_plan.transfer_len == local_block_len
+            and transfer_plan.transfer_len == remote_block_len
+        )
+        if can_coalesce:
+            grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
+                remote_block_ids, local_block_ids
+            )
+            for group_remote_block_id, group_local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
+                src = local_base_addr + group_local_block_id[0] * local_block_len
+                dst = remote_base_addr + group_remote_block_id[0] * remote_block_len
+                length = len(group_local_block_id) * transfer_plan.transfer_len
+                src_list.append(src)
+                dst_list.append(dst)
+                length_list.append(length)
+            return
+
+        local_token_len = local_block_len // block_size
+        remote_token_len = remote_block_len // block_size
+        for remote_block_id, local_block_id in zip(remote_block_ids, local_block_ids):
+            local_block_base = (
+                local_block_offset(local_block_id)
+                if local_block_offset is not None
+                else local_block_id * local_block_len
+            )
+            remote_block_base = remote_block_id * remote_block_len
+            if transfer_plan.split_by_token:
+                for token_idx in range(block_size):
+                    src = (
+                        local_base_addr
+                        + local_block_base
+                        + token_idx * local_token_len
+                        + transfer_plan.local_region_offset
+                    )
+                    dst = (
+                        remote_base_addr
+                        + remote_block_base
+                        + token_idx * remote_token_len
+                        + transfer_plan.remote_region_offset
+                    )
+                    src_list.append(src)
+                    dst_list.append(dst)
+                    length_list.append(transfer_plan.transfer_len)
+                continue
+
+            src = local_base_addr + local_block_base + transfer_plan.local_region_offset
+            dst = remote_base_addr + remote_block_base + transfer_plan.remote_region_offset
+            src_list.append(src)
+            dst_list.append(dst)
+            length_list.append(transfer_plan.transfer_len)
+
     def get_transfer_meta(self, send_task: SendTask, req_id: str, req_meta: ReqMeta, layer_group_idx: int):
         src_list: list[int] = []
         dst_list: list[int] = []
@@ -296,7 +470,12 @@ class KVCacheSendingLayerThread(threading.Thread):
             local_conv_addr, local_ssm_addr = local_layer_metadata.kv_caches_base_addr
             remote_conv_addr, remote_ssm_addr = remote_layer_metadata.kv_caches_base_addr
             local_conv_len, local_ssm_len = local_layer_metadata.block_len
-            tp_ratio = self.tp_size // req_meta.remote_tp_size
+            remote_tp_size = req_meta.remote_tp_size or self.tp_size
+            if self.tp_size < remote_tp_size:
+                raise NotImplementedError(
+                    "MooncakeLayerwiseConnector does not support Mamba layers with Prefill TP < Decode TP yet."
+                )
+            tp_ratio = self.tp_size // remote_tp_size
             if tp_ratio == 1:
                 src_list.extend(
                     [
@@ -354,16 +533,17 @@ class KVCacheSendingLayerThread(threading.Thread):
                 layer_local_kv_base_addr = local_layer_metadata.kv_caches_base_addr
                 layer_remote_kv_base_addr = remote_layer_metadata.kv_caches_base_addr
                 block_lens = local_layer_metadata.block_len
-                grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
-                    remote_block_ids, local_block_ids
-                )
+                remote_block_lens = remote_layer_metadata.block_len
+                block_size = layer_kv_cache_spec.block_size // local_layer_metadata.block_size_scale[0]
                 # kv cache quantization scenario
                 if (self.enable_kv_quant or self.enable_c8_quant) and send_task.k_quant_cache is not None:
                     assert len(block_lens) == 2, "Quantization block length must be 2!"
                     if self.enable_kv_quant:
                         quant_block_lens = [block_lens[0] // 2, block_lens[1]]
+                        remote_quant_block_lens = [remote_block_lens[0] // 2, remote_block_lens[1]]
                     else:
                         quant_block_lens = [block_lens[0] // 2, block_lens[1] // 2]
+                        remote_quant_block_lens = [remote_block_lens[0] // 2, remote_block_lens[1] // 2]
                     layer_local_quant_kv_addr = [self.k_buffer.data_ptr(), self.v_buffer.data_ptr()]
                     rearrange_block_ids = send_task.group_rearrange_block_ids[layer_group_idx]
                     # eg:[5,6,7,9] -> {5:0, 6:1, 7:2, 9:3}
@@ -371,32 +551,48 @@ class KVCacheSendingLayerThread(threading.Thread):
                         value: index
                         for index, value in enumerate(rearrange_block_ids)  # type:ignore
                     }
-                    for block_len, src_layer_base_addr, dst_layer_base_addr in zip(
-                        quant_block_lens, layer_local_quant_kv_addr, layer_remote_kv_base_addr
+                    for block_len, remote_block_len, src_layer_base_addr, dst_layer_base_addr in zip(
+                        quant_block_lens,
+                        remote_quant_block_lens,
+                        layer_local_quant_kv_addr,
+                        layer_remote_kv_base_addr,
                     ):
-                        for group_remote_block_id, group_local_block_id in zip(
-                            grouped_remote_block_ids, grouped_local_block_ids
-                        ):
-                            src = src_layer_base_addr + rearrange_block_dict[group_local_block_id[0]] * block_len
-                            dst = dst_layer_base_addr + group_remote_block_id[0] * block_len
-                            length = len(group_local_block_id) * block_len
-                            src_list.append(src)
-                            dst_list.append(dst)
-                            length_list.append(length)
+                        self._append_transfer_meta(
+                            src_list,
+                            dst_list,
+                            length_list,
+                            local_base_addr=src_layer_base_addr,
+                            remote_base_addr=dst_layer_base_addr,
+                            local_block_ids=local_block_ids,
+                            remote_block_ids=remote_block_ids,
+                            local_block_len=block_len,
+                            remote_block_len=remote_block_len,
+                            block_size=block_size,
+                            req_meta=req_meta,
+                            local_block_offset=lambda block_id, block_len=block_len: (
+                                rearrange_block_dict[block_id] * block_len
+                            ),
+                        )
                 else:
-                    for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
-                        zip(layer_local_kv_base_addr, layer_remote_kv_base_addr)
+                    for block_len, remote_block_len, src_layer_base_addr, dst_layer_base_addr in zip(
+                        block_lens,
+                        remote_block_lens,
+                        layer_local_kv_base_addr,
+                        layer_remote_kv_base_addr,
                     ):
-                        block_len = block_lens[k]
-                        for group_remote_block_id, group_local_block_id in zip(
-                            grouped_remote_block_ids, grouped_local_block_ids
-                        ):
-                            src = src_layer_base_addr + group_local_block_id[0] * block_len
-                            dst = dst_layer_base_addr + group_remote_block_id[0] * block_len
-                            length = len(group_local_block_id) * block_len
-                            src_list.append(src)
-                            dst_list.append(dst)
-                            length_list.append(length)
+                        self._append_transfer_meta(
+                            src_list,
+                            dst_list,
+                            length_list,
+                            local_base_addr=src_layer_base_addr,
+                            remote_base_addr=dst_layer_base_addr,
+                            local_block_ids=local_block_ids,
+                            remote_block_ids=remote_block_ids,
+                            local_block_len=block_len,
+                            remote_block_len=remote_block_len,
+                            block_size=block_size,
+                            req_meta=req_meta,
+                        )
             else:
                 rearrange_block_ids = send_task.group_rearrange_block_ids[layer_group_idx]
                 rearrange_block_dict = {
@@ -489,7 +685,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                         transfer_meta.req_ids,
                         session_id,
                     )
-                    self.failed_reqs.add(req_id)
+                    self.failed_reqs.update(transfer_meta.req_ids)
                 else:
                     req_end_time = time.perf_counter()
                     total_transfer_size = sum(transfer_meta.length) / 1024
@@ -522,6 +718,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
         local_engine_id: str,
         metadata: MooncakeAgentMetadata,
         ready_event: threading.Event,
+        local_handshake_port: int | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingLayerThread")
         self.tp_rank = tp_rank
@@ -530,10 +727,11 @@ class KVCacheRecvingLayerThread(threading.Thread):
         self.local_engine_id = local_engine_id
         self.side_channel_host = get_ip()
         self.side_channel_port = side_channel_port
+        self.handshake_port = local_handshake_port if local_handshake_port is not None else side_channel_port + tp_rank
         self.lock = threading.Lock()
         self.done_requests = set[str]()
         self.failed_requests = set[str]()
-        self.task_tracker = dict[str, int]()
+        self.task_tracker = dict[str, set[str]]()
         self.ready_event = ready_event
         self.metadata = metadata
 
@@ -587,8 +785,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
 
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
-        handshake_port = self.side_channel_port + self.tp_rank
-        path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
+        path = make_zmq_path("tcp", self.side_channel_host, self.handshake_port)
         logger.info("Starting listening on path: %s", path)
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(self.metadata)
@@ -661,6 +858,8 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
             remote_tp_size=kv_transfer_params.get("remote_tp_size"),
             remote_pcp_size=kv_transfer_params.get("remote_pcp_size"),
             remote_dcp_size=kv_transfer_params.get("remote_dcp_size"),
+            remote_tp_rank=kv_transfer_params.get("remote_tp_rank"),
+            remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             do_virtual=kv_transfer_params.get("do_virtual"),
             chunk_finish=chunk_finish,
             remote_cache_tokens=remote_cache_tokens,
@@ -668,6 +867,7 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
             prompt_len=prompt_len,
             local_transed_tokens=local_transed_tokens,
             trans_count=[],
+            request_id=request_id,
         )
 
 
@@ -722,6 +922,10 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished_all_groups(request, block_ids)
 
+    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_xfer_handshake_metadata(metadata)
+
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -774,6 +978,9 @@ class MooncakeLayerwiseConnectorScheduler:
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
 
         # disable prefill context parallel on decoder nodes
         if vllm_config.kv_transfer_config.is_kv_consumer:
@@ -784,7 +991,10 @@ class MooncakeLayerwiseConnectorScheduler:
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size
+            + vllm_config.parallel_config.data_parallel_rank
+            * vllm_config.parallel_config.tensor_parallel_size
+            * self.pp_size
+            * self.pcp_size
         )
 
         # Requests that need to start recv.
@@ -792,6 +1002,7 @@ class MooncakeLayerwiseConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int], list[list[int]]]] = {}
         self._reqs_need_send_layerwise: dict[str, SendReqInfo] = {}
+        self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
         self.executor = ThreadPoolExecutor(32)
         tls_config: dict[str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("tls_config", {})
         ssl_keyfile = tls_config.get("ssl_keyfile")
@@ -883,6 +1094,8 @@ class MooncakeLayerwiseConnectorScheduler:
                 remote_tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
                 remote_pcp_size=self.vllm_config.parallel_config.prefill_context_parallel_size,
                 remote_dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
+                remote_ptp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+                remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
                 remote_cached_tokens=remote_cached_tokens,
             )
             if not do_virtual:
@@ -1038,6 +1251,13 @@ class MooncakeLayerwiseConnectorScheduler:
         # layer_wise push, not need delay_free_blocks
         return False, None
 
+    def set_xfer_handshake_metadata(self, metadata: dict[int, KVConnectorHandshakeMetadata]) -> None:
+        for local_rank, rank_metadata in metadata.items():
+            self.multi_nodes_meta_mapping[str(local_rank)] = {
+                "host": rank_metadata.local_ip,
+                "engine_id": rank_metadata.engine_id,
+            }
+
 
 class MooncakeLayerwiseConnectorWorker:
     """Implementation of Worker side methods"""
@@ -1058,7 +1278,10 @@ class MooncakeLayerwiseConnectorWorker:
         self.engine_id = engine_id
         self.tp_rank: int = get_tensor_model_parallel_rank()
         self.tp_size: int = vllm_config.parallel_config.tensor_parallel_size
-        self.pcp_size: int = vllm_config.parallel_config.prefill_context_parallel_size
+        self.pp_rank = get_pp_group().rank_in_group
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.pcp_size: int = get_pcp_group().world_size
+        assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank: int = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size: int = vllm_config.parallel_config.decode_context_parallel_size
         self.dcp_rank: int = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
@@ -1077,9 +1300,13 @@ class MooncakeLayerwiseConnectorWorker:
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size
+            + vllm_config.parallel_config.data_parallel_rank
+            * vllm_config.parallel_config.tensor_parallel_size
+            * self.pp_size
+            * self.pcp_size
         )
-        self.handshake_port = self.side_channel_port + self.tp_rank
+        device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
+        self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         logger.info("Initializing Mooncake work %s", engine_id)
         self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
@@ -1126,6 +1353,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.virtual_request: set[str] = set()
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
+        self.local_layer_names: list[str] = []
 
     def create_kv_buffer(self, first_kv_cache_tuple):
         alignment = 2 * 1024 * 1024
@@ -1252,6 +1480,7 @@ class MooncakeLayerwiseConnectorWorker:
             )
         if mtp_layer_name != "":
             self.index_to_name[max(self.index_to_name.keys()) + 1].append(mtp_layer_name)
+        self.local_layer_names = [self.index_to_name[layer_idx][0] for layer_idx in sorted(self.index_to_name.keys())]
         if self.total_layers < len(self.layer_metadata.keys()):
             self.total_layers = len(self.layer_metadata.keys())
 
@@ -1274,6 +1503,7 @@ class MooncakeLayerwiseConnectorWorker:
                 tp_rank=self.tp_rank,
                 pd_head_ratio=self.pd_head_ratio,
                 num_head_replica=self.num_head_replica,
+                total_num_kv_heads=self.total_num_kv_heads,
                 layer_metadata=self.layer_metadata,
                 use_mla=self.use_mla,
                 use_attn_mamba_hybrid=self.use_attn_mamba_hybrid,
@@ -1297,6 +1527,7 @@ class MooncakeLayerwiseConnectorWorker:
                 self.engine_id,
                 metadata,
                 ready_event,
+                local_handshake_port=self.handshake_port,
             )
             self.kv_recv_layer_thread.start()
             ready_event.wait()
@@ -1346,8 +1577,18 @@ class MooncakeLayerwiseConnectorWorker:
         remote_pcp_size = req_meta.remote_pcp_size
         remote_dcp_size = req_meta.remote_dcp_size
         remote_tp_size = req_meta.remote_tp_size
+        assert remote_pcp_size is not None
+        assert remote_dcp_size is not None
+        assert remote_tp_size is not None
+        assert req_meta.remote_host is not None
+        if self.tp_size < remote_tp_size and self.pcp_size * self.dcp_size * remote_pcp_size * remote_dcp_size > 1:
+            raise NotImplementedError(
+                "MooncakeLayerwiseConnector does not support Prefill TP < Decode TP together with "
+                "prefill context parallel or decode context parallel yet."
+            )
         remote_hosts = [req_meta.remote_host]
         remote_port = req_meta.remote_port
+        assert remote_port is not None
         local_transed_tokens = max(req_meta.remote_cache_tokens, req_meta.local_transed_tokens)
         # local_transed_tokens tokens that have already been transmitted on the local side
         local_computed_tokens = req_meta.local_computed_tokens
@@ -1454,12 +1695,13 @@ class MooncakeLayerwiseConnectorWorker:
         return transfer_mappings
 
     def _get_kv_split_metadata_for_mamba(self, req_meta: ReqMeta, req_idx: int, req_id: str, group_idx: int):
-        assert self.tp_size >= req_meta.remote_tp_size, (
-            "Mamba group prefill TP_size must equal or larger than decode TP_size."
-        )
         remote_tp_size = req_meta.remote_tp_size
+        assert remote_tp_size is not None
+        assert self.tp_size >= remote_tp_size, "Mamba group prefill TP_size must equal or larger than decode TP_size."
         tp_raito = self.tp_size // remote_tp_size
         remote_host = req_meta.remote_host
+        assert remote_host is not None
+        assert req_meta.remote_port is not None
         remote_port = req_meta.remote_port + self.tp_rank // tp_raito
         transfer_mappings: dict[tuple[str, int], dict[str, Any]] = {}
         if req_meta.chunk_finish:
@@ -1504,6 +1746,20 @@ class MooncakeLayerwiseConnectorWorker:
                 ]
         return block_ids
 
+    def _get_remote_host_info_by_port(
+        self,
+        base_port: int,
+        remote_handshake_port: int,
+        remote_host: str,
+        remote_engine_id: str,
+        remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]] | None,
+    ) -> tuple[str, str]:
+        rank = str(remote_handshake_port - base_port)
+        if remote_multi_nodes_meta_mapping is None or remote_multi_nodes_meta_mapping.get(rank) is None:
+            return remote_host, remote_engine_id
+        info = remote_multi_nodes_meta_mapping[rank]
+        return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
+
     def start_load_kv(self, metadata: MooncakeLayerwiseConnectorMetadata):
         """Start loading KV blocks from remote engine."""
         self.current_layer = 0
@@ -1545,15 +1801,30 @@ class MooncakeLayerwiseConnectorWorker:
                         transfer_mappings[(host, port)]["trans_count"][i] = single_group_transfer_mappings[
                             (host, port)
                         ]["trans_count"]
-                assert len(transfer_mappings) <= 1, f"Not support add mutil transfer task for req_id:{req_id}"
-                update_req_meta = copy.deepcopy(req_meta)
-                for (host, port), block_dict in transfer_mappings.items():
+                for transfer_idx, ((host, port), block_dict) in enumerate(transfer_mappings.items()):
+                    assert req_meta.remote_port is not None
+                    assert req_meta.remote_tp_size is not None
+                    update_req_meta = copy.deepcopy(req_meta)
+                    update_req_meta.request_id = req_id
+                    host, remote_engine_id = self._get_remote_host_info_by_port(
+                        req_meta.remote_port,
+                        port,
+                        host,
+                        req_meta.remote_engine_id,
+                        req_meta.remote_multi_nodes_meta_mapping,
+                    )
                     update_req_meta.remote_host = host
+                    update_req_meta.remote_engine_id = remote_engine_id
                     update_req_meta.remote_port = port
                     update_req_meta.local_block_ids = self._get_kernel_block_ids(block_dict["local_block_ids"])
                     update_req_meta.remote_block_ids = self._get_kernel_block_ids(block_dict["remote_block_ids"])
-                    update_req_meta.trans_count = block_dict["trans_count"]
-                    update_metadata[req_id] = update_req_meta
+                    update_req_meta.remote_tp_rank = (port - req_meta.remote_port) % req_meta.remote_tp_size
+                    update_req_meta.trans_count = [
+                        trans_count * self.pp_size if trans_count else trans_count
+                        for trans_count in block_dict["trans_count"]
+                    ]
+                    update_req_id = req_id if len(transfer_mappings) == 1 else f"{req_id}#{transfer_idx}"
+                    update_metadata[update_req_id] = update_req_meta
             metadata.requests = {}
             for req_id, req_meta in update_metadata.items():
                 metadata.requests[req_id] = update_metadata[req_id]
@@ -1606,7 +1877,7 @@ class MooncakeLayerwiseConnectorWorker:
                 return
             # get reshape and cache event
             if layer_name == "":
-                layer_name = self.index_to_name[self.current_layer][0]
+                layer_name = self.local_layer_names[self.current_layer]
             if (self.use_mla and not hasattr(attn_metadata[layer_name], "reshape_cache_event")) or (
                 not self.use_mla and not hasattr(attn_metadata, "reshape_cache_event")
             ):
@@ -1816,7 +2087,8 @@ class MooncakeLayerwiseConnectorWorker:
         return req_meta
 
     def send_done_send_signal(self, req_id, req_meta, group_idx, trans_flag: bool = True):
-        external_req_id = get_external_request_id(req_id)
+        original_req_id = req_meta.request_id or req_id
+        external_req_id = get_external_request_id(original_req_id)
         send_msg_type = DONE_SENDING_MSG if trans_flag else FAILED_SENDING_MSG
         logger.info(
             "Sending transmitting signal %s for request %s to %s:%d",
