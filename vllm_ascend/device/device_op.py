@@ -17,6 +17,7 @@
 #
 import torch
 import torch_npu
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
@@ -24,6 +25,16 @@ from vllm_ascend.device.mxfp_compat import (
     SCALE_DTYPES,
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+
+def _is_hnd_kv_cache(key, key_cache) -> bool:
+    return (
+        get_kv_cache_layout() == "HND"
+        and key_cache.dim() == 4
+        and key.dim() >= 3
+        and key_cache.shape[1] == key.shape[-2]
+        and key_cache.shape[-1] == key.shape[-1]
+    )
 
 
 class BaseDeviceAdaptor:
@@ -312,14 +323,17 @@ class BaseDeviceAdaptor:
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-        torch_npu.npu_scatter_pa_kv_cache(
-            key=key.contiguous(),
-            value=value.contiguous(),
-            key_cache=key_cache,
-            value_cache=value_cache,
-            slot_mapping=slot_mapping.contiguous(),
-            cache_mode="Norm",
-        )
+        kwargs = {
+            "key": key.contiguous(),
+            "value": value.contiguous(),
+            "key_cache": key_cache,
+            "value_cache": value_cache,
+            "slot_mapping": slot_mapping.contiguous(),
+            "cache_mode": "Norm",
+        }
+        if _is_hnd_kv_cache(key, key_cache):
+            kwargs["scatter_mode"] = "NHSD"
+        torch_npu.npu_scatter_pa_kv_cache(**kwargs)
 
     @staticmethod
     def npu_moe_init_routing(
