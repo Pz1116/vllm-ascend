@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
@@ -106,6 +107,21 @@ class AscendAttentionBackend(AttentionBackend):
         cache_type: str = "",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        cache_layout = get_kv_cache_layout()
+        if cache_layout == "NHD" and include_num_layers_dimension:
+            return (2, 0, 1, 3, 4, 5)
+        if cache_layout == "NHD":
+            return (0, 1, 2, 3, 4)
+        if cache_layout == "HND" and include_num_layers_dimension:
+            return (2, 4, 0, 1, 3, 5)
+        if cache_layout == "HND":
+            return (0, 1, 3, 2, 4)
+        raise ValueError(f"Unknown cache layout format {cache_layout}.")
 
     @staticmethod
     def swap_blocks(

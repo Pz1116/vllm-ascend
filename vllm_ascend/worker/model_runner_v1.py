@@ -151,6 +151,11 @@ from vllm_ascend.utils import (
     set_weight_prefetch_method,
     should_skip_allreduce_across_dp_group,
 )
+from vllm_ascend.worker.kv_cache_layout import (
+    get_kv_cache_stride_order,
+    view_kv_cache_with_stride_order,
+    view_split_kv_cache_with_stride_order,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
@@ -3900,7 +3905,13 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
-                        k_cache = raw_tensor.view(current_kv_cache_spec.dtype).view(kv_cache_shape)
+                        stride_order = get_kv_cache_stride_order(attn_backend, kv_cache_shape)
+                        k_cache = view_kv_cache_with_stride_order(
+                            raw_tensor,
+                            current_kv_cache_spec.dtype,
+                            kv_cache_shape,
+                            stride_order,
+                        )
                         kv_caches[layer_name] = k_cache
                         continue  # Skip the rest of the AttentionSpec handling
                     else:
@@ -3987,8 +3998,20 @@ class NPUModelRunner(GPUModelRunner):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
-                    k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
-                    v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape)
+                    k_cache = view_split_kv_cache_with_stride_order(
+                        raw_k_tensor,
+                        k_cache_dtype,
+                        kv_cache_shape,
+                        k_shape,
+                        attn_backend,
+                    )
+                    v_cache = view_split_kv_cache_with_stride_order(
+                        raw_v_tensor,
+                        v_cache_dtype,
+                        kv_cache_shape,
+                        v_shape,
+                        attn_backend,
+                    )
 
                     if self.use_sparse:
                         dsa_k_cache_shape = (
