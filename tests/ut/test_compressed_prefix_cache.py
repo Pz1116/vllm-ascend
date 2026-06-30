@@ -25,7 +25,6 @@ from vllm.v1.request import Request
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
-    _block_hash_to_bytes,
     get_block_hashes,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
@@ -334,7 +333,7 @@ def test_external_coordinator_does_not_double_apply_compress_ratio() -> None:
     _, hit_length = coordinator.find_longest_cache_hit(
         request.block_hashes,
         logical_block_size,
-        ExternalCachedBlockPool({(0, _block_hash_to_bytes(chunk_hash))}),
+        ExternalCachedBlockPool({(0, bytes(chunk_hash))}),
     )
 
     assert hit_length == logical_block_size

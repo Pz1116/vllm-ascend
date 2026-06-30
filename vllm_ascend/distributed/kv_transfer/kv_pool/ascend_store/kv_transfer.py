@@ -8,7 +8,7 @@ from typing import Any
 import torch
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 
@@ -171,13 +171,6 @@ class KVTransferThread(threading.Thread):
 
         return iter_with_legacy_process_tokens()
 
-    @staticmethod
-    def _key_chunk_hash_to_block_hash(key) -> BlockHash:
-        try:
-            return BlockHash(bytes.fromhex(key.chunk_hash))
-        except ValueError:
-            return BlockHash(key.chunk_hash.encode("utf-8"))
-
     def _prepare_value(
         self,
         start: int,
@@ -319,7 +312,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 starts.append(start)
                 ends.append(end)
                 keys.append(key.to_string())
-                block_hashes.append(self._key_chunk_hash_to_block_hash(key))
+                assert key.chunk_hash_bytes is not None
+                block_hashes.append(key.chunk_hash_bytes)
                 key_block_ids.append(block_id)
 
             if not self.dcp_size > 1 and not req_meta.disable_tp_key_sharding:

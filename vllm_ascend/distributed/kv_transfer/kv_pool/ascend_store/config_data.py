@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import torch
@@ -42,6 +42,7 @@ class KeyMetadata:
 class PoolKey:
     key_metadata: KeyMetadata
     chunk_hash: str
+    chunk_hash_bytes: BlockHash | None = field(default=None, compare=False, kw_only=True)
 
     def __hash__(self):
         return hash(
@@ -79,6 +80,7 @@ class PoolKey:
                     self.key_metadata,
                     self.chunk_hash,
                     layer_id,
+                    chunk_hash_bytes=self.chunk_hash_bytes,
                 )
             )
         return keys
@@ -281,6 +283,7 @@ class ChunkedTokenDatabase:
         cache_role: str = "kv",
         cache_family: str | None = None,
         layer_id: int | None = None,
+        chunk_hash_bytes: BlockHash | None = None,
     ):
         assert self.metadata is not None
         if cache_family is None:
@@ -297,6 +300,7 @@ class ChunkedTokenDatabase:
                 cache_family=cache_family,
             ),
             chunk_hash,
+            chunk_hash_bytes=chunk_hash_bytes,
         )
 
     def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
@@ -399,7 +403,7 @@ class ChunkedTokenDatabase:
     def process_tokens(
         self,
         token_len: int,
-        block_hashes: BlockHashList | list[str],
+        block_hashes: BlockHashList,
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
         cache_role: str = "kv",
@@ -434,7 +438,8 @@ class ChunkedTokenDatabase:
                 continue
             if chunk_filter is not None and not chunk_filter(start_idx):
                 continue
-            hash_val = _block_hash_to_hex(block_hashes[chunk_id])
+            chunk_hash = block_hashes[chunk_id]
+            hash_val = _block_hash_to_hex(chunk_hash)
             yield (
                 start_idx,
                 end_idx,
@@ -443,13 +448,14 @@ class ChunkedTokenDatabase:
                     kv_cache_group_id=kv_cache_group_id,
                     cache_role=cache_role,
                     cache_family=cache_family,
+                    chunk_hash_bytes=chunk_hash,
                 ),
             )
 
     def process_tokens_with_block_ids(
         self,
         token_len: int,
-        block_hashes: BlockHashList | list[str],
+        block_hashes: BlockHashList,
         block_ids: list[int],
         mask_num: int = 0,
         kv_cache_group_id: int = 0,
@@ -511,11 +517,13 @@ class ChunkedTokenDatabase:
             block_id = block_ids[block_idx]
             if skip_null_blocks and block_id <= 0:
                 continue
+            chunk_hash = grouped_hashes[chunk_id]
             key = self._make_key_by_hash(
-                _block_hash_to_hex(grouped_hashes[chunk_id]),
+                _block_hash_to_hex(chunk_hash),
                 kv_cache_group_id=kv_cache_group_id,
                 cache_role=cache_role,
                 cache_family=cache_family,
+                chunk_hash_bytes=chunk_hash,
             )
             yield start_idx, end_idx, key, block_id
 
@@ -559,10 +567,10 @@ def normalize_block_ids_by_group(block_ids: tuple[list[int], ...] | list[int] | 
 
 
 def get_block_hashes(
-    block_hashes: BlockHashList | list[str],
+    block_hashes: BlockHashList,
     group_block_size: int,
     hash_block_size: int,
-) -> Sequence[BlockHash | str]:
+) -> Sequence[BlockHash]:
     if group_block_size == hash_block_size:
         return block_hashes
     assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
@@ -571,7 +579,7 @@ def get_block_hashes(
 
 
 class _LazyGroupedBlockHashList(Sequence[BlockHash]):
-    def __init__(self, block_hashes: Sequence[BlockHash | str], scale_factor: int):
+    def __init__(self, block_hashes: Sequence[BlockHash], scale_factor: int):
         self.block_hashes = block_hashes
         self.scale_factor = scale_factor
         self._len = len(block_hashes) // scale_factor
@@ -599,30 +607,18 @@ class _LazyGroupedBlockHashList(Sequence[BlockHash]):
         return self._cache[idx]
 
 
-def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
+def _rehash_block_hash_group(block_hashes: Sequence[BlockHash]) -> BlockHash:
     hasher = hashlib.sha256()
     hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
     hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
     for block_hash in block_hashes:
-        hash_bytes = _block_hash_to_bytes(block_hash)
+        hash_bytes = bytes(block_hash)
         hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
         hasher.update(hash_bytes)
     return BlockHash(hasher.digest())
 
 
-def _block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
-    if isinstance(block_hash, str):
-        try:
-            return bytes.fromhex(block_hash)
-        except ValueError:
-            pass
-        return block_hash.encode("utf-8")
-    return bytes(block_hash)
-
-
-def _block_hash_to_hex(block_hash: BlockHash | str) -> str:
-    if isinstance(block_hash, str):
-        return block_hash
+def _block_hash_to_hex(block_hash: BlockHash) -> str:
     return bytes(block_hash).hex()
 
 

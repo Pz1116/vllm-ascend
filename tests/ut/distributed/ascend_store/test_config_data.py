@@ -43,7 +43,7 @@ def _expected_grouped_hash(*block_hashes):
     hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
     hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
     for block_hash in block_hashes:
-        hash_bytes = block_hash.encode("utf-8") if isinstance(block_hash, str) else bytes(block_hash)
+        hash_bytes = bytes(block_hash)
         hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
         hasher.update(hash_bytes)
     return hasher.digest()
@@ -131,8 +131,8 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         result = list(self.db.process_tokens(32, []))
         self.assertEqual(result, [])
 
-    def test_process_tokens_with_str_hashes(self):
-        hashes = ["aaa", "bbb"]
+    def test_process_tokens_with_bytes_hashes(self):
+        hashes = [b"aaa", b"bbb"]
         result = list(self.db.process_tokens(32, hashes))
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][0], 0)  # start
@@ -140,13 +140,13 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(result[1][0], 16)
         self.assertEqual(result[1][1], 32)
 
-    def test_process_tokens_with_bytes_hashes(self):
+    def test_process_tokens_with_binary_hashes(self):
         hashes = [b"\xaa\xbb", b"\xcc\xdd"]
         result = list(self.db.process_tokens(32, hashes))
         self.assertEqual(len(result), 2)
 
     def test_process_tokens_with_mask(self):
-        hashes = ["a", "b", "c"]
+        hashes = [b"a", b"b", b"c"]
         result = list(self.db.process_tokens(48, hashes, mask_num=16))
         # first chunk (start=0 < mask_num=16) should be skipped
         self.assertEqual(len(result), 2)
@@ -174,16 +174,16 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         )
 
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
-        hashes = ["a", "b", "c", "d"]
+        hashes = [b"a", b"b", b"c", b"d"]
         # token_len=32 means only first 2 blocks valid
         result = list(self.db.process_tokens(32, hashes))
         self.assertEqual(len(result), 2)
 
     def test_process_tokens_rehashes_grouped_hashes(self):
         db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None, hash_block_size=8)
-        result = list(db.process_tokens(32, ["a", "b", "c", "d"]))
+        result = list(db.process_tokens(32, [b"a", b"b", b"c", b"d"]))
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash("a", "b").hex())
+        self.assertEqual(result[0][2].chunk_hash, _expected_grouped_hash(b"a", b"b").hex())
         self.assertEqual(len(result[0][2].chunk_hash), 64)
 
     def test_grouped_hashes_are_lazy_and_memoized(self):
@@ -195,13 +195,13 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             return original_rehash(block_hashes)
 
         with patch.object(config_data_module, "_rehash_block_hash_group", side_effect=wrapped_rehash):
-            grouped_hashes = get_block_hashes(["a", "b", "c", "d"], 16, 8)
+            grouped_hashes = get_block_hashes([b"a", b"b", b"c", b"d"], 16, 8)
             self.assertEqual(len(grouped_hashes), 2)
             self.assertEqual(calls, [])
 
             self.assertEqual(grouped_hashes[1], grouped_hashes[1])
 
-        self.assertEqual(calls, [("c", "d")])
+        self.assertEqual(calls, [(b"c", b"d")])
 
     def test_process_tokens_filters_before_rehash(self):
         db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None, hash_block_size=8)
@@ -213,11 +213,11 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             return original_rehash(block_hashes)
 
         with patch.object(config_data_module, "_rehash_block_hash_group", side_effect=wrapped_rehash):
-            result = list(db.process_tokens(32, ["a", "b", "c", "d"], mask_num=16))
+            result = list(db.process_tokens(32, [b"a", b"b", b"c", b"d"], mask_num=16))
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0][0], 16)
-        self.assertEqual(calls, [("c", "d")])
+        self.assertEqual(calls, [(b"c", b"d")])
 
     def test_process_tokens_with_block_ids_does_not_rehash_masked_chunks_twice(self):
         db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None, hash_block_size=8)
@@ -229,22 +229,21 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             return original_rehash(block_hashes)
 
         with patch.object(config_data_module, "_rehash_block_hash_group", side_effect=wrapped_rehash):
-            result = list(db.process_tokens_with_block_ids(32, ["a", "b", "c", "d"], [10, 11], mask_num=16))
+            result = list(db.process_tokens_with_block_ids(32, [b"a", b"b", b"c", b"d"], [10, 11], mask_num=16))
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0][0], 16)
         self.assertEqual(result[0][3], 11)
-        self.assertEqual(calls, [("c", "d")])
+        self.assertEqual(calls, [(b"c", b"d")])
 
-    def test_process_tokens_rehashes_raw_bytes_and_hex_strings_consistently(self):
+    def test_process_tokens_rehashes_stable_bytes(self):
         db = ChunkedTokenDatabase(self.meta, block_size=16, partitions=None, hash_block_size=8)
         raw_hashes = [bytes([idx]) * 32 for idx in range(1, 5)]
-        hex_hashes = [block_hash.hex() for block_hash in raw_hashes]
 
         raw_keys = [key.to_string() for _, _, key in db.process_tokens(32, raw_hashes)]
-        hex_keys = [key.to_string() for _, _, key in db.process_tokens(32, hex_hashes)]
 
-        self.assertEqual(raw_keys, hex_keys)
+        self.assertEqual(len(raw_keys), 2)
+        self.assertTrue(raw_keys[0].endswith(_expected_grouped_hash(raw_hashes[0], raw_hashes[1]).hex()))
 
     def test_store_mask_delegates_to_cache_coordinator(self):
         coordinator = MagicMock()
@@ -272,23 +271,25 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertTrue(self.db.mask_allows_chunk(masks, 0, 16))
         self.assertFalse(self.db.mask_allows_chunk(masks, 1, 16))
 
-    def test_get_block_hashes_rehashes_grouped_str_hashes(self):
-        result = list(get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16))
+    def test_get_block_hashes_rehashes_grouped_hashes(self):
+        result = list(get_block_hashes([b"a", b"b", b"c", b"d"], group_block_size=32, hash_block_size=16))
         self.assertEqual(
             result,
             [
-                _expected_grouped_hash("a", "b"),
-                _expected_grouped_hash("c", "d"),
+                _expected_grouped_hash(b"a", b"b"),
+                _expected_grouped_hash(b"c", b"d"),
             ],
         )
 
-    def test_get_block_hashes_rehashes_raw_bytes_and_hex_strings_consistently(self):
+    def test_get_block_hashes_rehashes_raw_bytes_consistently(self):
         raw_hashes = [bytes([idx]) * 32 for idx in range(1, 5)]
-        hex_hashes = [block_hash.hex() for block_hash in raw_hashes]
 
         self.assertEqual(
-            list(get_block_hashes(hex_hashes, group_block_size=32, hash_block_size=16)),
             list(get_block_hashes(raw_hashes, group_block_size=32, hash_block_size=16)),
+            [
+                _expected_grouped_hash(raw_hashes[0], raw_hashes[1]),
+                _expected_grouped_hash(raw_hashes[2], raw_hashes[3]),
+            ],
         )
 
     def test_get_block_hashes_rehashes_grouped_bytes_hashes(self):
