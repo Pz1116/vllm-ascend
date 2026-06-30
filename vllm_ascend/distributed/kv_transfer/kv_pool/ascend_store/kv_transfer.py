@@ -1,13 +1,14 @@
 import queue
 import threading
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import torch
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
-from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 
@@ -16,7 +17,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ChunkedTokenDatabase,
     LayerMultiBlockReqMeta,
     ReqMeta,
-    get_block_hashes,
 )
 # isort: on
 
@@ -137,6 +137,7 @@ class KVTransferThread(threading.Thread):
         kv_cache_group_id: int = 0,
         skip_null_blocks: bool = False,
         cache_role: str = "kv",
+        chunk_filter: Callable[[int], bool] | None = None,
     ):
         process_with_block_ids = getattr(self.token_database, "process_tokens_with_block_ids", None)
         if process_with_block_ids is not None:
@@ -148,6 +149,7 @@ class KVTransferThread(threading.Thread):
                 kv_cache_group_id=kv_cache_group_id,
                 skip_null_blocks=skip_null_blocks,
                 cache_role=cache_role,
+                chunk_filter=chunk_filter,
             )
 
         def iter_with_legacy_process_tokens():
@@ -157,6 +159,8 @@ class KVTransferThread(threading.Thread):
                 token_iter = self.token_database.process_tokens(token_len, block_hashes)
             group_block_size = self._get_block_size(kv_cache_group_id)
             for start, end, key in token_iter:
+                if chunk_filter is not None and not chunk_filter(start):
+                    continue
                 block_idx = start // group_block_size
                 if block_idx >= len(block_ids):
                     continue
@@ -166,6 +170,13 @@ class KVTransferThread(threading.Thread):
                 yield start, end, key, block_id
 
         return iter_with_legacy_process_tokens()
+
+    @staticmethod
+    def _key_chunk_hash_to_block_hash(key) -> BlockHash:
+        try:
+            return BlockHash(bytes.fromhex(key.chunk_hash))
+        except ValueError:
+            return BlockHash(key.chunk_hash.encode("utf-8"))
 
     def _prepare_value(
         self,
@@ -295,11 +306,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             key_block_ids = []
             block_ids = req_meta.block_ids_by_group[group_id]
             group_block_size = self._get_block_size(group_id)
-            group_block_hashes = get_block_hashes(
-                req_meta.block_hashes,
-                group_block_size,
-                getattr(self.token_database, "hash_block_size", group_block_size),
-            )
+            chunk_filter = lambda start, group_id=group_id: self._chunk_mask_allows(store_masks, group_id, start)
 
             for start, end, key, block_id in self._process_tokens_with_block_ids(
                 token_len,
@@ -307,13 +314,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 block_ids,
                 kv_cache_group_id=group_id,
                 skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
+                chunk_filter=chunk_filter,
             ):
-                if not self._chunk_mask_allows(store_masks, group_id, start):
-                    continue
                 starts.append(start)
                 ends.append(end)
                 keys.append(key.to_string())
-                block_hashes.append(group_block_hashes[start // group_block_size])
+                block_hashes.append(self._key_chunk_hash_to_block_hash(key))
                 key_block_ids.append(block_id)
 
             if not self.dcp_size > 1 and not req_meta.disable_tp_key_sharding:
@@ -442,6 +448,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 // group_block_size
                 * group_block_size
             )
+            chunk_filter = lambda start, group_id=group_id: self._chunk_mask_allows(load_masks, group_id, start)
             for start, end, key, block_id in self._process_tokens_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
@@ -449,9 +456,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 mask_num,
                 kv_cache_group_id=group_id,
                 skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
+                chunk_filter=chunk_filter,
             ):
-                if not self._chunk_mask_allows(load_masks, group_id, start):
-                    continue
                 addr, size, _ = self._prepare_value(
                     start,
                     end,
