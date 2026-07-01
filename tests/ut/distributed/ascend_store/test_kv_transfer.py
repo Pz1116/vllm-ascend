@@ -79,7 +79,7 @@ class FakeTokenDatabase:
             end = min(start + self.block_size, token_len)
             if start < mask_num:
                 continue
-            yield start, end, PoolKey(meta, f"k{i}")
+            yield start, end, PoolKey(meta, f"k{i}", chunk_hash_bytes=h)
 
     def prepare_value(self, start, end, block_ids):
         block_id = block_ids[start // self.block_size]

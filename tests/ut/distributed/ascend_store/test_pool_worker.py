@@ -295,7 +295,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
 
         worker = KVPoolWorker(config, use_layerwize=False)
         worker.m_store.exists.return_value = [1, 1]
-        result = worker.lookup(32, ["hash0", "hash1"], use_layerwise=False)
+        result = worker.lookup(32, [b"hash0", b"hash1"], use_layerwise=False)
         self.assertEqual(result, 32)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
@@ -325,7 +325,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
 
         worker = KVPoolWorker(config, use_layerwize=False)
         worker.m_store.exists.return_value = [1, 0]
-        result = worker.lookup(32, ["h0", "h1"], use_layerwise=False)
+        result = worker.lookup(32, [b"h0", b"h1"], use_layerwise=False)
         self.assertEqual(result, 16)  # first non-exist at index 1 => starts[1]=16
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
@@ -355,7 +355,7 @@ class TestKVPoolWorkerInit(unittest.TestCase):
 
         worker = KVPoolWorker(config, use_layerwize=False)
         worker.m_store.exists.side_effect = Exception("conn error")
-        result = worker.lookup(32, ["h0", "h1"], use_layerwise=False)
+        result = worker.lookup(32, [b"h0", b"h1"], use_layerwise=False)
         self.assertEqual(result, 0)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.importlib")
@@ -530,7 +530,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             req_id="r1",
             token_len_chunk=16,
             block_ids=[0],
-            block_hashes=["h0"],
+            block_hashes=[b"h0"],
             load_spec=load_spec,
         )
         meta = AscendConnectorMetadata(set(), set())
@@ -550,7 +550,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             req_id="r1",
             token_len_chunk=64,
             block_ids=[99],
-            block_hashes=["h0", "h1", "h2", "h3"],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
             load_spec=load_spec,
         )
         meta = AscendConnectorMetadata(set(), set())
@@ -568,7 +568,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             req_id="r1",
             token_len_chunk=16,
             block_ids=[0],
-            block_hashes=["h0"],
+            block_hashes=[b"h0"],
             load_spec=None,
         )
         meta = AscendConnectorMetadata(set(), set())
@@ -584,7 +584,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             req_id="r1",
             token_len_chunk=16,
             block_ids=[0],
-            block_hashes=["h0"],
+            block_hashes=[b"h0"],
             can_save=True,
         )
         meta = AscendConnectorMetadata(set(), set())
@@ -601,7 +601,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             req_id="r1",
             token_len_chunk=16,
             block_ids=[0],
-            block_hashes=["h0"],
+            block_hashes=[b"h0"],
             can_save=False,
         )
         meta = AscendConnectorMetadata(set(), set())
@@ -633,32 +633,32 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def test_lookup_scheduler_all_cached(self):
         worker = self._make_worker()
         worker.m_store.exists.return_value = [1, 1]
-        result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
+        result = worker.lookup_scheduler(32, [b"h0", b"h1"], use_layerwise=False)
         self.assertEqual(result, 32)
 
     def test_lookup_scheduler_partial(self):
         worker = self._make_worker()
         worker.m_store.exists.return_value = [1, 0]
-        result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
+        result = worker.lookup_scheduler(32, [b"h0", b"h1"], use_layerwise=False)
         self.assertEqual(result, 16)
 
     def test_lookup_scheduler_exception(self):
         worker = self._make_worker()
         worker.m_store.exists.side_effect = Exception("fail")
-        result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
+        result = worker.lookup_scheduler(32, [b"h0", b"h1"], use_layerwise=False)
         self.assertEqual(result, 0)
 
     def test_lookup_layerwise(self):
         worker = self._make_worker()
         # 2 blocks * 2 layers = 4 keys, all exist
         worker.m_store.exists.return_value = [1, 1, 1, 1]
-        result = worker.lookup(32, ["h0", "h1"], use_layerwise=True)
+        result = worker.lookup(32, [b"h0", b"h1"], use_layerwise=True)
         self.assertEqual(result, 32)
 
     def test_lookup_scheduler_layerwise(self):
         worker = self._make_worker()
         worker.m_store.exists.return_value = [1, 1, 1, 1]
-        result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=True)
+        result = worker.lookup_scheduler(32, [b"h0", b"h1"], use_layerwise=True)
         self.assertEqual(result, 32)
 
     def test_lookup_scheduler_multi_tp(self):
@@ -699,7 +699,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker = KVPoolWorker(config, use_layerwize=False)
         # 2 blocks * 2 tp_ranks = 4 keys
         worker.m_store.exists.return_value = [1, 1, 1, 1]
-        result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
+        result = worker.lookup_scheduler(32, [b"h0", b"h1"], use_layerwise=False)
         self.assertEqual(result, 32)
 
     def test_get_and_clear_finished_requests_with_preempted(self):

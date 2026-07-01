@@ -933,15 +933,6 @@ class KVPoolWorker:
             value_end = len(key)
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
-    @staticmethod
-    def _chunk_hash_to_bytes(chunk_hash: str) -> bytes:
-        if len(chunk_hash) == 64:
-            try:
-                return bytes.fromhex(chunk_hash)
-            except ValueError:
-                pass
-        return chunk_hash.encode("utf-8")
-
     def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:
         if not include_all_ranks:
             return [key]
@@ -969,16 +960,17 @@ class KVPoolWorker:
         exists: set[tuple[int, bytes]] = set()
         for group_id in kv_cache_group_ids:
             keys: list[str] = []
-            chunk_hashes: list[str] = []
+            chunk_hashes: list[BlockHash] = []
             variant_counts: list[int] = []
             for _, _, key in self.token_database.process_tokens(
                 token_len,
                 block_hashes,
                 kv_cache_group_id=group_id,
             ):
+                assert key.chunk_hash_bytes is not None
                 variants = self._expand_lookup_key_variants(key.to_string(), group_id, include_all_ranks)
                 keys.extend(variants)
-                chunk_hashes.append(key.chunk_hash)
+                chunk_hashes.append(key.chunk_hash_bytes)
                 variant_counts.append(len(variants))
 
             if not keys:
@@ -988,7 +980,7 @@ class KVPoolWorker:
             for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
                 values = res[offset : offset + count]  # type: ignore[index]
                 if values and all(value == 1 for value in values):
-                    exists.add((group_id, self._chunk_hash_to_bytes(chunk_hash)))
+                    exists.add((group_id, bytes(chunk_hash)))
                 offset += count
 
             logger.debug(
