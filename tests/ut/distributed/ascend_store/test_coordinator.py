@@ -18,9 +18,11 @@
 import unittest
 from unittest.mock import patch
 
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
-
+# isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
+# isort: on
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import get_block_hashes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -33,6 +35,12 @@ def _hashes(num_blocks: int) -> list[bytes]:
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):
+    def test_external_cached_block_pool_accepts_hex_hash(self):
+        block_hash = bytes([1]) * 32
+        pool = ExternalCachedBlockPool({(0, block_hash)})
+
+        self.assertIsNotNone(pool.get_cached_block(block_hash.hex(), [0]))
+
     def test_compressed_group_hits_on_effective_granularity(self):
         block_hashes = _hashes(128)
         grouped_hash = get_block_hashes(block_hashes, group_block_size=128 * 128, hash_block_size=128)[0]
@@ -103,6 +111,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             return_value=(([False, False, False, True],), 2048),
         ):
             self.assertEqual(coord.load_mask(_hashes(16), 2048), ([True] * 4,))
+
 
 if __name__ == "__main__":
     unittest.main()

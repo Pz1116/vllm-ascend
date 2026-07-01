@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from importlib import import_module
 from typing import Any, cast
@@ -27,15 +28,24 @@ class ExternalCachedBlockPool:
 
     def get_cached_block(
         self,
-        block_hash: BlockHash,
+        block_hash: BlockHash | bytes | str,
         group_ids: list[int],
     ) -> list[KVCacheBlock] | None:
         if self._exists is None:
             return [self._present_block] * len(group_ids)
-        h = bytes(block_hash)
+        h = _block_hash_to_bytes(block_hash)
         if all((group_id, h) in self._exists for group_id in group_ids):
             return [self._present_block] * len(group_ids)
         return None
+
+
+def _block_hash_to_bytes(block_hash: BlockHash | bytes | str) -> bytes:
+    if isinstance(block_hash, str):
+        try:
+            return bytes.fromhex(block_hash)
+        except ValueError:
+            return block_hash.encode("utf-8")
+    return bytes(block_hash)
 
 
 class AscendStoreCoordinator:
@@ -96,7 +106,7 @@ class AscendStoreCoordinator:
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 # External compressed keys are already grouped by the effective block size.
-                effective_spec = replace(effective_spec, compress_ratio=1)
+                effective_spec = _copy_spec_with_compress_ratio(effective_spec, 1)
             self.group_effective_specs.append(effective_spec)
             manager_cls = _get_manager_class(spec)
 
@@ -295,6 +305,15 @@ def _copy_spec_with_block_size(spec: Any, block_size: int) -> Any:
     if copy_with_new_block_size is not None:
         return copy_with_new_block_size(block_size)
     return replace(spec, block_size=block_size)
+
+
+def _copy_spec_with_compress_ratio(spec: Any, compress_ratio: int) -> Any:
+    try:
+        return replace(spec, compress_ratio=compress_ratio)
+    except TypeError:
+        copied_spec = copy.copy(spec)
+        copied_spec.compress_ratio = compress_ratio
+        return copied_spec
 
 
 def _get_manager_class_cache() -> dict[str, Any]:
