@@ -34,6 +34,7 @@ from vllm_ascend.device.mxfp_compat import (
 )
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.utils import maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
@@ -139,6 +140,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).contiguous()
+        if not getattr(layer, "_mlapo_managed", False):
+            layer.weight.data = maybe_trans_nz(layer.weight.data, customize_dtype=torch.float8_e4m3fn)
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -332,8 +335,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         """Process weights after loading for MXFP8 inference.
 
         This method transforms weights for NPU MXFP8 computation:
-        - w13_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size)
-        - w2_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size)
+        - w13_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size) in FRACTAL_NZ
+        - w2_weight: (g_num, n_size, k_size) -> (g_num, k_size, n_size) in FRACTAL_NZ
         - w13_weight_scale: (g_num, n_size, k_size) -> (g_num, k_size//2, n_size, 2)
         - w2_weight_scale: (g_num, n_size, k_size) -> (g_num, k_size//2, n_size, 2)
 
@@ -361,8 +364,10 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
+        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
+        layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data, customize_dtype=torch.float8_e4m3fn)
+        layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data, customize_dtype=torch.float8_e4m3fn)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
 
