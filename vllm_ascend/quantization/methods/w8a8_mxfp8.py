@@ -368,8 +368,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data, customize_dtype=torch.float8_e4m3fn)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data, customize_dtype=torch.float8_e4m3fn)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -419,7 +419,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             orig_scale_shape = orig_shapes[scale_key]
 
             target_scale = scale_tensor.data.transpose(1, 2).reshape(orig_scale_shape).contiguous()
-            scale_tensor.data = scale_tensor.data.transpose(1, 2).view(orig_scale_shape)
+            scale_tensor.data = scale_tensor.data.transpose(1, 2).reshape(orig_scale_shape)
             scale_tensor.data.copy_(target_scale)
 
         _restore("w13_weight", "w13_weight_scale")
