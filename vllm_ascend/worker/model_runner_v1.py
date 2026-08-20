@@ -1741,12 +1741,6 @@ class NPUModelRunner(GPUModelRunner):
         # scheduler_output in engine core process.
         # TODO(Ronald1995): deepcopy is expensive when there is a large
         # number of requests, optimize it later.
-        if (
-            self.use_async_scheduling
-            and self.num_spec_tokens
-            and self._draft_token_ids is None  # type: ignore[has-type]
-        ):
-            scheduler_output = deepcopy(scheduler_output)
         pp_group = get_pp_group()
         if pp_group.world_size > 1 and not pp_group.is_last_rank:
             new_token_ids = scheduler_output.scheduled_cached_reqs.new_token_ids
