@@ -21,6 +21,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     PreprocessType,
+    _is_mtp_layer,
     custom_kv_rmsnorm_rope,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
@@ -76,6 +77,47 @@ class TestAscendSFABackend(TestBase):
         mock_enable_dcp.return_value = True
         impl_cls = AscendSFABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
+
+
+class TestIsMtpLayer(TestBase):
+    def test_backbone_layer_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(
+            _is_mtp_layer(
+                config,
+                "model.layers.2.self_attn.attn",
+            )
+        )
+
+    def test_mtp_layer_is_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertTrue(
+            _is_mtp_layer(
+                config,
+                "model.layers.80.self_attn.attn",
+            )
+        )
+        self.assertTrue(
+            _is_mtp_layer(
+                config,
+                "mtp.0.self_attn.attn",
+            )
+        )
+
+    def test_missing_layer_info_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(
+            _is_mtp_layer(
+                config,
+                "unknown",
+            )
+        )
+        self.assertFalse(
+            _is_mtp_layer(
+                SimpleNamespace(),
+                "model.layers.0.self_attn.attn",
+            )
+        )
 
 
 class TestAscendSFADeviceOperator(TestBase):

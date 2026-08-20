@@ -4579,6 +4579,17 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, DeepseekV32IndexerCache):
+                # GLM-5.1 static IndexCache S layers keep the Indexer module
+                # only for weight loading; at runtime they behave like GLM-5.2
+                # shared-indexer layers and do not need a separate indexer KV
+                # cache. Skip allocating one so both models share the same
+                # no-indexer-cache path.
+                attn_layer_name = layer_name.replace(".indexer.k_cache", ".attn")
+                attn_layer = attn_layers.get(attn_layer_name)
+                if attn_layer is not None:
+                    impl = getattr(attn_layer, "impl", None)
+                    if impl is not None and not getattr(impl, "runtime_has_indexer", True):
+                        continue
                 # TODO: This mirrors upstream's separated KV/indexer specs for
                 # SFA, but keeps Ascend-specific shape/block-size accounting.
                 # Remove this special case once the generic vLLM spec/backend

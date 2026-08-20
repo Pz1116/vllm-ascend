@@ -65,6 +65,7 @@ from vllm_ascend.utils import (
     get_potential_max_tokens,
     maybe_trans_nz,
     oproj_tp_enable,
+    parse_layer_idx,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -110,6 +111,25 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
         if config is not None and hasattr(config, attr):
             return bool(getattr(config, attr))
     return False
+
+
+def _is_mtp_layer(
+    hf_config: Any,
+    layer_name: str,
+) -> bool:
+    """Whether a layer is an MTP/nextn layer (not a static backbone layer)."""
+    layer_name = layer_name or ""
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+    if num_hidden_layers is None:
+        return False
+    # MTP modules are usually named "mtp.N.self_attn..." without a "layers."
+    # prefix; detect them explicitly.
+    if ".mtp." in f".{layer_name}.":
+        return True
+    layer_id = parse_layer_idx(layer_name)
+    if layer_id is None:
+        return False
+    return layer_id >= num_hidden_layers
 
 
 class AscendSFABackend(AttentionBackend):
@@ -541,7 +561,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         self.q_b_proj = kwargs["q_b_proj"]
-        self.skip_topk = kwargs.get("skip_topk", False)
+        self._skip_topk = bool(kwargs.get("skip_topk", False))
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
 
         ascend_config = get_ascend_config()
@@ -565,6 +585,14 @@ class AscendSFAImpl(MLAAttentionImpl):
             "use_index_cache",
         ) or _has_shared_indexer_layers(config_candidates)
         self.use_index_cache = self.skip_topk or self.index_cache_enabled
+        # GLM-5.1 IndexCache keeps a per-layer Indexer for weight-loading
+        # compatibility even on layers that reuse another layer's top-k indices.
+        # Those static S layers do not need to compute/store their own indexer
+        # keys, so skip the indexer pre-process and KV writes for them. MTP
+        # layers are excluded because they may be toggled at runtime by
+        # set_skip_topk and still need their own indexer cache.
+        self._is_mtp_layer = _is_mtp_layer(hf_config, self.layer_name)
+        self.skip_indexer_pre_process = self._skip_topk and not self._is_mtp_layer
         self.has_indexer = self.indexer is not None
         if not self.has_indexer and not self.skip_topk:
             raise ValueError(
@@ -635,6 +663,26 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
+
+    @property
+    def skip_topk(self) -> bool:
+        return self._skip_topk
+
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self._skip_topk = bool(value)
+        if hasattr(self, "_is_mtp_layer"):
+            self.skip_indexer_pre_process = self._skip_topk and not self._is_mtp_layer
+
+    @property
+    def runtime_has_indexer(self) -> bool:
+        """Whether this layer actually consumes/owns a runtime indexer cache.
+
+        Static IndexCache S layers keep an Indexer module for GLM-5.1 weight
+        loading, but at runtime they behave like GLM-5.2 shared-indexer layers
+        and do not use their own indexer KV cache.
+        """
+        return self.has_indexer and not getattr(self, "skip_indexer_pre_process", False)
 
     @property
     def kv_cache_indexer_k_idx(self) -> int:
@@ -1659,7 +1707,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_pe.view(-1, k_pe.shape[-1]),
                 k_nope.view(-1, k_nope.shape[-1]),
             ]
-            if self.has_indexer and not self.enable_sparse_li_c8:
+            if self.runtime_has_indexer and not self.enable_sparse_li_c8:
                 assert k_li is not None
                 fused_kv_parts.append(k_li.view(-1, k_li.shape[-1]))
 
@@ -1672,7 +1720,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if kv_ag_handle is not None:
             kv_ag_handles.append(kv_ag_handle)
 
-        if self.has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
+        if self.runtime_has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
             assert k_li is not None
             k_li, kv_ag_handle = all_gather_async(
                 k_li,
@@ -1682,7 +1730,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if kv_ag_handle is not None:
                 kv_ag_handles.append(kv_ag_handle)
 
-        if self.has_indexer and self.enable_sparse_li_c8:
+        if self.runtime_has_indexer and self.enable_sparse_li_c8:
             assert k_li_scale is not None
             k_li_scale, kv_ag_handle = all_gather_async(
                 k_li_scale,
@@ -1767,7 +1815,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     )
                     k_pe = None
                     k_nope = None
-                elif not self.has_indexer:
+                elif not self.runtime_has_indexer:
                     k_pe, k_nope = fused_kv_no_split.split(
                         [self.qk_rope_head_dim, self.kv_lora_rank],
                         dim=-1,
@@ -1826,14 +1874,16 @@ class AscendSFAImpl(MLAAttentionImpl):
           -> ``(packed_kv_cache, indexer_k_cache, indexer_scale_cache)``
 
         Layers that reuse another layer's top-k indices have no local indexer;
-        for those layers, the main cache tuple is returned unchanged.
+        for those layers, the main cache tuple is returned unchanged. Static
+        IndexCache S layers also return only the main cache because their local
+        indexer cache is not computed or consumed.
         """
         # TODO: Remove this recomposition once SFA kernels accept split
         # main/indexer cache handles directly. The allocator now owns them as
         # separate cache specs, while the current kernel path still expects the
         # legacy combined tuple layout.
         main_cache = kv_cache
-        if main_cache is None or not self.has_indexer:
+        if main_cache is None or not self.runtime_has_indexer:
             return main_cache
 
         indexer_cache = self.indexer.k_cache.kv_cache
@@ -1933,7 +1983,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     "SFA Prolog V3 requires one cache index per input token, "
                     f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping.numel()}."
                 )
-            if self.has_indexer:
+            if self.runtime_has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
             else:
                 k_li, k_li_scale = None, None
@@ -1971,7 +2021,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            if self.has_indexer:
+            if self.runtime_has_indexer:
                 k_li, k_li_scale = self.indexer_select_pre_process(
                     x=hidden_states,
                     cos=cos,
@@ -2026,14 +2076,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                 full_gather_o_proj_enabled,
             )
 
-            if self.has_indexer:
+            if self.runtime_has_indexer:
                 assert k_li is not None
                 k_li = self._get_full_kv(k_li, attn_metadata)
 
         if kv_cache is not None and self.is_kv_producer:
             attn_metadata.reshape_cache_event = torch.npu.Event()
 
-        if kv_cache is not None and self.has_indexer:
+        if kv_cache is not None and self.runtime_has_indexer:
             assert k_li is not None
             use_li_c8_reshape_optim = self._use_li_c8_reshape_optim()
             dsa_k_cache_idx = self.kv_cache_indexer_k_idx
@@ -2072,6 +2122,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                             slot_mapping.view(-1, 1),
                             k_li_scale.view(-1, k_li_scale.shape[-1]),
                         )
+            notify_kv_cache_written(self.layer_name or "")
+        elif kv_cache is not None and self.has_indexer and self.skip_indexer_pre_process:
+            # Static IndexCache S layers still write the main MLA KV cache;
+            # only the per-layer indexer KV cache is intentionally skipped.
             notify_kv_cache_written(self.layer_name or "")
 
         if self.enable_dsa_cp and attn_metadata.dsa_cp_context is not None:
