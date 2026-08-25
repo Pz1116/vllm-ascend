@@ -156,12 +156,20 @@ class KVPoolScheduler:
             use_hybrid=self.use_hybrid,
         )
         self.tp_mismatch = tp_mismatch_info.enabled
+        self.effective_tp_size = tp_mismatch_info.effective_tp_size
 
         self.page_size_bytes = page_size_bytes
         logger.info("KV pool page_size_bytes: %d", page_size_bytes)
         backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
         self.backend_name = backend_name.lower()
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        self.use_scheduler_client_for_lookup = (
+            not self.use_layerwise
+            and self.backend_name == "memcache"
+            and vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_scheduler_client_for_lookup", False)
+        )
+        if self.use_scheduler_client_for_lookup and self.use_hybrid:
+            raise ValueError("Scheduler-client lookup does not support hybrid KV cache layouts yet.")
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -226,7 +234,7 @@ class KVPoolScheduler:
         include_layers: bool = False,
         kv_cache_group_id: int = 0,
     ) -> list[list[str]]:
-        head_or_tp_ranks = self.tp_size // self.put_step
+        head_or_tp_ranks = self.effective_tp_size if self.tp_mismatch else self.tp_size // self.put_step
         cache_family = self._get_group_family(self.kv_cache_group_families, kv_cache_group_id)
         keys_by_block = []
         for block_hash in block_hashes:
@@ -530,14 +538,19 @@ class KVPoolScheduler:
 
             if token_len < self.cache_transfer_granularity:
                 return 0, False
+            if not self.use_layerwise and num_computed_tokens >= token_len:
+                return 0, False
 
             if self.use_layerwise:
                 num_external_hit_tokens = self._get_store_lookup_hit_tokens(
                     request, token_len, num_computed_tokens, include_layers=True
                 )
+            elif self.use_scheduler_client_for_lookup:
+                # Match the existing worker lookup semantics: query the full
+                # remote prefix instead of assuming the local HBM prefix also
+                # exists in KV Pool.
+                num_external_hit_tokens = self._get_store_lookup_hit_tokens(request, token_len, 0)
             else:
-                if num_computed_tokens >= token_len:
-                    return 0, False
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
                 num_external_hit_tokens = self.client.lookup(
@@ -731,9 +744,7 @@ class KVPoolScheduler:
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=block_ids_by_group,
             num_saved_tokens=0,
-            token_ids=(
-                request.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None
-            ),
+            token_ids=(request.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
             num_prompt_tokens=len(request.prompt_token_ids),
             block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
@@ -784,9 +795,7 @@ class KVPoolScheduler:
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=new_block_ids_by_group,
             num_saved_tokens=0,
-            token_ids=(
-                request_real.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None
-            ),
+            token_ids=(request_real.prompt_token_ids[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
             num_prompt_tokens=len(request_real.prompt_token_ids),
             block_keys=(previous_tracker.block_keys.copy() if previous_tracker else []),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
