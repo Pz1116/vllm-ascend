@@ -53,6 +53,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     "SOC_VERSION": lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation
     "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
+    # Log the requests currently executing on each PP rank.
+    "VLLM_ASCEND_LOG_PP_RUNNING": lambda: bool(int(os.getenv("VLLM_ASCEND_LOG_PP_RUNNING", "0"))),
     # The home path for CANN toolkit. If not set, the default value is
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),

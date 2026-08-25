@@ -626,7 +626,28 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
-        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        log_pp_running = (
+            envs_ascend.VLLM_ASCEND_LOG_PP_RUNNING
+            and forward_pass
+            and get_pp_group().world_size > 1
+            and get_tp_group().rank_in_group == 0
+        )
+        if log_pp_running:
+            req_ids = list(scheduler_output.num_scheduled_tokens)
+            logger.info(
+                "[PP-RUNNING] PP rank %d Running: %d reqs, req_ids=%s",
+                get_pp_group().rank_in_group,
+                len(req_ids),
+                req_ids,
+            )
+        try:
+            output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        finally:
+            if log_pp_running:
+                logger.info(
+                    "[PP-RUNNING] PP rank %d Running: 0 reqs",
+                    get_pp_group().rank_in_group,
+                )
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
