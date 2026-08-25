@@ -1854,6 +1854,7 @@ class KVPoolWorker:
         block_hashes: list[BlockHash],
         group_id: int,
         use_layerwise: bool,
+        need_starts: bool = True,
     ) -> tuple[list[str], list[int], list[int]]:
         keys: list[str] = []
         starts: list[int] = []
@@ -1870,7 +1871,8 @@ class KVPoolWorker:
                 token_len, block_hashes, kv_cache_group_id=group_id
             ):
                 keys.append(key_string)
-                starts.append(start)
+                if need_starts:
+                    starts.append(start)
                 ends.append(end)
         return keys, starts, ends
 
@@ -1966,9 +1968,41 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
+        if not keys:
+            return []
+        group_tp_size = self.get_group_tp_size(group_id)
+
+        # Non-layerwise keys share the same metadata prefix and only differ in
+        # their trailing hash. Split that prefix once instead of scanning and
+        # rebuilding every key twice for every PP/TP rank.
+        key = keys[0]
+        tp_marker = "@head_or_tp_rank:"
+        pp_marker = "@pp_rank:"
+        tp_start = key.find(tp_marker)
+        tp_value_start = tp_start + len(tp_marker)
+        tp_end = key.find("@", tp_value_start)
+        pp_start = key.find(pp_marker, tp_end)
+        pp_value_start = pp_start + len(pp_marker)
+        pp_end = key.find("@", pp_value_start)
+
+        if tp_start >= 0 and tp_end >= 0 and pp_start >= 0:
+            if pp_end < 0:
+                pp_end = len(key)
+            prefix = key[:tp_value_start]
+            between_ranks = key[tp_end:pp_value_start]
+            suffixes = [key[pp_end:] for key in keys]
+            expanded: list[str] = []
+            for pp_rank in range(self.pp_size):
+                for tp_rank in range(group_tp_size):
+                    rank_prefix = f"{prefix}{tp_rank}{between_ranks}{pp_rank}"
+                    expanded.extend(rank_prefix + suffix for suffix in suffixes)
+            return expanded
+
+        # Layerwise keys do not contain pp_rank. Preserve their existing
+        # replacement and expansion behavior.
         expanded: list[str] = []
         for pp_rank in range(self.pp_size):
-            for tp_rank in range(self.get_group_tp_size(group_id)):
+            for tp_rank in range(group_tp_size):
                 for key in keys:
                     tp_key = self._replace_key_field(key, "head_or_tp_rank", tp_rank)
                     expanded.append(self._replace_key_field(tp_key, "pp_rank", pp_rank))
@@ -2101,7 +2135,13 @@ class KVPoolWorker:
             if coordinator_hit is not None:
                 return coordinator_hit
             for group_id in kv_cache_group_ids:
-                keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id, use_layerwise)
+                keys, _, ends = self._build_lookup_keys(
+                    token_len,
+                    block_hashes,
+                    group_id,
+                    use_layerwise,
+                    need_starts=False,
+                )
 
                 if not keys:
                     return 0
