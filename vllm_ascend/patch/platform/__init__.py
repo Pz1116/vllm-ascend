@@ -40,6 +40,9 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 
+if os.getenv("VLLM_ASCEND_SCHED_TRACE", "0") == "1":
+    import vllm_ascend.patch.platform.patch_scheduler_trace  # noqa
+
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 
