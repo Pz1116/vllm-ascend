@@ -16,6 +16,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -30,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    infer_group_cache_families,
 )
 
 
@@ -47,6 +49,35 @@ class TestKeyMetadata(unittest.TestCase):
         self.assertEqual(meta.pcp_rank, 0)
         self.assertEqual(meta.dcp_rank, 0)
         self.assertEqual(meta.pp_rank, 0)
+
+
+class TestInferGroupCacheFamilies(unittest.TestCase):
+    def test_falls_back_to_model_ratios_when_specs_lack_ratios(self):
+        group = SimpleNamespace(
+            layer_names=["model.layers.0", "model.layers.1"],
+            kv_cache_spec=SimpleNamespace(
+                kv_cache_specs={
+                    "model.layers.0": SimpleNamespace(),
+                    "model.layers.1": SimpleNamespace(),
+                }
+            ),
+        )
+
+        families = infer_group_cache_families(
+            [group],
+            compress_ratios=[1, 8],
+            hf_config=SimpleNamespace(model_type="glm_moe_dsa"),
+        )
+
+        self.assertEqual(families, ["mixed"])
+
+    def test_missing_ratios_remains_default(self):
+        group = SimpleNamespace(
+            layer_names=["model.layers.0"],
+            kv_cache_spec=SimpleNamespace(compress_ratio=None),
+        )
+
+        self.assertEqual(infer_group_cache_families([group], None), ["default"])
 
 
 class TestPoolKey(unittest.TestCase):

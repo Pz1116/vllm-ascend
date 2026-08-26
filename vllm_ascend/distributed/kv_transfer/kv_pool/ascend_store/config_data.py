@@ -242,7 +242,7 @@ def infer_group_cache_families(
     families: list[str] = []
     for group in kv_cache_groups:
         spec_ratios = _get_group_spec_ratios(group)
-        if len(spec_ratios) == 1:
+        if len(spec_ratios) == 1 and spec_ratios != {None}:
             families.append(infer_cache_family_from_ratio(next(iter(spec_ratios))))
             continue
         if len(spec_ratios) > 1:
