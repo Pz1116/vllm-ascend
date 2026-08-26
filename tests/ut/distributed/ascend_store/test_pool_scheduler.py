@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -152,6 +154,53 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(need, 63)
         self.assertEqual(scheduler.load_specs["r1"].kvpool_cached_tokens, 63)
         self.assertEqual(scheduler.load_specs["r1"].kvpool_store_skip_tokens, 64)
+
+    def test_async_scheduler_client_lookup_defers_then_reports(self):
+        config = self._make_config(
+            block_size=16,
+            extra_config={
+                "backend": "memcache",
+                "load_async": True,
+                "lookup_async": True,
+                "use_scheduler_client_for_lookup": True,
+            },
+        )
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+        gate = threading.Event()
+
+        def batch_is_exist(keys):
+            gate.wait()
+            return [1, 1, 1, 0][: len(keys)]
+
+        scheduler.store_scheduler.batch_is_exist.side_effect = batch_is_exist
+        request = MagicMock()
+        request.prompt_token_ids = list(range(64))
+        request.num_tokens = 64
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 4
+
+        try:
+            self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (None, False))
+            self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (None, False))
+
+            gate.set()
+            deadline = time.monotonic() + 5
+            result = (None, False)
+            while result[0] is None and time.monotonic() < deadline:
+                result = scheduler.get_num_new_matched_tokens(request, 0)
+                time.sleep(0.005)
+
+            self.assertEqual(result, (48, True))
+            scheduler.store_scheduler.batch_is_exist.assert_called_once()
+            self.assertNotIn("r1", scheduler._lookup_futures)
+        finally:
+            gate.set()
+            scheduler.shutdown()
+
+    def test_lookup_async_requires_scheduler_client(self):
+        config = self._make_config(extra_config={"lookup_async": True})
+        with self.assertRaisesRegex(ValueError, "use_scheduler_client_for_lookup"):
+            KVPoolScheduler(config, use_layerwise=False)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_full_hbm_hit_skips_external_lookup(self, mock_client_cls):
@@ -355,6 +404,8 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
     def test_build_connector_meta_finished_req(self, mock_client_cls):
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)
+        lookup_future = MagicMock()
+        scheduler._lookup_futures["r1"] = lookup_future
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import RequestTracker
 
@@ -376,6 +427,8 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         _meta = scheduler.build_connector_meta(sched_output)
         self.assertNotIn("r1", scheduler._request_trackers)
+        self.assertNotIn("r1", scheduler._lookup_futures)
+        lookup_future.cancel.assert_called_once_with()
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_consumer_skip_save(self, mock_client_cls):

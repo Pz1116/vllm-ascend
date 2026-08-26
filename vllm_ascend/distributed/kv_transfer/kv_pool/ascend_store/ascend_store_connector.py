@@ -142,9 +142,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
         pass
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
+
+    def shutdown(self) -> None:
+        connector_scheduler = getattr(self, "connector_scheduler", None)
+        if connector_scheduler is not None:
+            connector_scheduler.shutdown()
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         assert self.connector_scheduler is not None
