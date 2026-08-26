@@ -539,7 +539,7 @@ class KVPoolWorker:
             kv_cache_groups,
             self.compress_ratios,
             self.hf_config,
-            use_sparse=self.use_sparse and not self.use_compress,
+            use_sparse=self.use_sparse and not self.use_compress and not self.use_hybrid,
         )
 
     def _infer_group_block_sizes(
