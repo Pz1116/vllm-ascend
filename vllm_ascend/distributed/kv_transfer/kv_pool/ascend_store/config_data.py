@@ -69,6 +69,21 @@ def infer_tp_mismatch_info(
     )
 
 
+def get_kv_pool_lookup_tp_size(
+    tp_size: int,
+    num_kv_heads: int,
+    use_mla: bool,
+    use_sparse: bool,
+    use_align_state: bool = False,
+    effective_tp_size: int | None = None,
+) -> int:
+    if effective_tp_size is not None:
+        return effective_tp_size
+    if use_align_state:
+        return tp_size
+    return min(tp_size, 1 if use_mla or use_sparse else num_kv_heads)
+
+
 # Parameters related to the key
 @dataclass
 class KeyMetadata:

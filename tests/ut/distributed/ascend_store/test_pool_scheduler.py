@@ -571,10 +571,22 @@ class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
     def test_generate_store_query_keys_multi_tp(self):
         scheduler = self._make_scheduler()
         scheduler.tp_size = 2
+        scheduler.num_kv_head = 2
         scheduler.put_step = 1
         result = scheduler._generate_store_query_keys([b"\xaa\xbb"])
         # 1 block * 2 tp_ranks * 1 pp * 1 pcp * 1 dcp = 2 keys
         self.assertEqual(len(result[0]), 2)
+
+    def test_generate_store_query_keys_sparse_pp2_tp8(self):
+        scheduler = self._make_scheduler()
+        scheduler.tp_size = 8
+        scheduler.pp_size = 2
+        scheduler.num_kv_head = 8
+        scheduler.put_step = 1
+        scheduler.use_sparse = True
+        result = scheduler._generate_store_query_keys([b"\xaa\xbb"])
+        self.assertEqual(len(result[0]), 2)
+        self.assertTrue(all("@head_or_tp_rank:0@" in key for key in result[0]))
 
 
 class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):

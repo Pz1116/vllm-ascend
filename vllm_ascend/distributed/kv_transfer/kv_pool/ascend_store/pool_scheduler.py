@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     block_hash_to_str,
     get_block_hashes,
     get_cache_family_granularity,
+    get_kv_pool_lookup_tp_size,
     infer_cache_family_ratio,
     infer_group_cache_families,
     infer_tp_mismatch_info,
@@ -187,6 +188,7 @@ class KVPoolScheduler:
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
+        self.use_sparse = hasattr(model_config.hf_text_config, "index_topk")
         if self.use_mla:
             self.num_kv_head = 1
         else:
@@ -234,7 +236,13 @@ class KVPoolScheduler:
         include_layers: bool = False,
         kv_cache_group_id: int = 0,
     ) -> list[list[str]]:
-        head_or_tp_ranks = self.effective_tp_size if self.tp_mismatch else self.tp_size // self.put_step
+        head_or_tp_ranks = get_kv_pool_lookup_tp_size(
+            self.tp_size,
+            self.num_kv_head,
+            self.use_mla,
+            self.use_sparse,
+            effective_tp_size=self.effective_tp_size if self.tp_mismatch else None,
+        )
         cache_family = self._get_group_family(self.kv_cache_group_families, kv_cache_group_id)
         keys_by_block = []
         for block_hash in block_hashes:
