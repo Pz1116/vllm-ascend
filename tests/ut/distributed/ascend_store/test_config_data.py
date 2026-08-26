@@ -79,6 +79,20 @@ class TestInferGroupCacheFamilies(unittest.TestCase):
 
         self.assertEqual(infer_group_cache_families([group], None), ["default"])
 
+    def test_sparse_group_is_mixed_after_scheduler_spec_flattening(self):
+        group = SimpleNamespace(
+            layer_names=[
+                "model.layers.0.self_attn.attn",
+                "model.layers.0.self_attn.indexer.k_cache",
+            ],
+            kv_cache_spec=SimpleNamespace(),
+        )
+
+        self.assertEqual(
+            infer_group_cache_families([group], None, use_sparse=True),
+            ["mixed"],
+        )
+
 
 class TestPoolKey(unittest.TestCase):
     def setUp(self):

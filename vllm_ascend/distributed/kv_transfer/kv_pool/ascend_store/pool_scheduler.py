@@ -67,6 +67,7 @@ class KVPoolScheduler:
         if self.compress_ratios is None:
             self.compress_ratios = getattr(hf_config, "compress_ratios", None)
         self.use_compress = self.compress_ratios is not None
+        self.use_sparse = hasattr(vllm_config.model_config.hf_text_config, "index_topk")
         self.use_hybrid = self._uses_hybrid_kv_cache(vllm_config, kv_cache_config)
         self.kv_cache_group_ids = (
             list(range(len(kv_cache_config.kv_cache_groups)))
@@ -188,7 +189,6 @@ class KVPoolScheduler:
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
-        self.use_sparse = hasattr(model_config.hf_text_config, "index_topk")
         if self.use_mla:
             self.num_kv_head = 1
         else:
@@ -401,7 +401,12 @@ class KVPoolScheduler:
 
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
-        return infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
+        return infer_group_cache_families(
+            kv_cache_groups,
+            self.compress_ratios,
+            self.hf_config,
+            use_sparse=self.use_sparse and not self.use_compress,
+        )
 
     def _infer_group_block_sizes(
         self,

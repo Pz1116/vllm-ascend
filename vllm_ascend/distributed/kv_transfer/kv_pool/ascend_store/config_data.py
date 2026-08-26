@@ -235,12 +235,16 @@ def infer_group_cache_families(
     kv_cache_groups: Sequence[object] | None,
     compress_ratios: Sequence[int] | None,
     hf_config: Any | None = None,
+    use_sparse: bool = False,
 ) -> list[str]:
     if kv_cache_groups is None:
-        return ["default"]
+        return ["mixed" if use_sparse else "default"]
 
     families: list[str] = []
     for group in kv_cache_groups:
+        if use_sparse:
+            families.append("mixed")
+            continue
         spec_ratios = _get_group_spec_ratios(group)
         if len(spec_ratios) == 1 and spec_ratios != {None}:
             families.append(infer_cache_family_from_ratio(next(iter(spec_ratios))))
