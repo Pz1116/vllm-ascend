@@ -551,16 +551,24 @@ class PDProducerAsyncKVScheduler(Scheduler):
                     num_encoder_tokens = sum(request.get_num_encoder_embeds(i) for i in encoder_inputs_to_schedule)
 
                 reserved_blocks = 0
+                num_allocation_tokens = num_new_tokens
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    if self.scheduler_reserve_full_isl:
+                        # Size the block table for the remaining prompt without
+                        # adding those tokens to this step's model work.
+                        num_allocation_tokens = max(
+                            0,
+                            min(request.num_tokens, self.max_model_len) - num_computed_tokens,
+                        )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens,
+                    num_allocation_tokens,
                     num_new_computed_tokens=num_new_local_computed_tokens,
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
