@@ -301,6 +301,7 @@ class PDProducerAsyncKVScheduler(Scheduler):
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
+            step_remote_misses = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and (
                 token_budget > 0 or self._has_pending_waiting_async_load_candidate()
@@ -464,7 +465,10 @@ class PDProducerAsyncKVScheduler(Scheduler):
                     # No token budget left for compute; only async KV loads
                     # are allowed this step.
                     request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
+                    if request.num_computed_tokens == 0 and num_external_computed_tokens == 0:
+                        step_remote_misses.prepend_request(request)
+                    else:
+                        step_skipped_waiting.prepend_request(request)
                     continue
                 elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
                     # DP prefill balancing: defer this step's local prefill
@@ -668,6 +672,8 @@ class PDProducerAsyncKVScheduler(Scheduler):
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
+            if step_remote_misses:
+                self.waiting.prepend_requests(step_remote_misses)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
